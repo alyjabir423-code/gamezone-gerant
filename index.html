@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone CI — Gérant sécurisé</title>
+<title>GameZone CI — Gérant V31 sécurisé</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -255,7 +255,7 @@ button,.ni,.pc-btn{touch-action:manipulation}
     <div class="lerr" id="lerr"></div>
   </div>
   <div style="font-size:11px;color:var(--muted);margin-top:14px;text-align:center">Ancien nom du gérant + mot de passe</div>
-  <div style="font-size:9px;color:#6b7280;margin-top:5px;text-align:center">Version sécurisée — nom d’utilisateur + Firebase + Worker privé</div>
+  <div style="font-size:9px;color:#6b7280;margin-top:5px;text-align:center">Version V31 — synchro corrigée + prises sécurisées</div>
   <div style="margin-top:20px;padding:12px 16px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:10px;max-width:340px;width:100%;text-align:center;cursor:pointer" onclick="resetRoomCode()">
     <div style="font-size:12px;font-weight:700;color:#ef4444;margin-bottom:2px">⚠️ Cet appareil sert un autre commerce ?</div>
     <div style="font-size:11px;color:var(--muted);text-decoration:underline">Changer de code de salle</div>
@@ -616,20 +616,27 @@ function createRestRoot(tenantKey){
   return {
     _rootPath:rootPath,
     child:function(k){
-      const childPath=rootPath+'/'+String(k||'').replace(/^\/+|\/+$/g,'');
-      return {
-        set:async function(v){
-          await restFetchJson(restUrl(childPath),{
-            method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(v)
-          });
-          return true;
-        }
+      const makeRef=function(path){
+        return {
+          child:function(next){return makeRef(path+'/'+String(next||'').replace(/^\/+|\/+$/g,''));},
+          set:async function(v){
+            await restFetchJson(restUrl(path),{
+              method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(v)
+            });
+            return true;
+          }
+        };
       };
+      return makeRef(rootPath+'/'+String(k||'').replace(/^\/+|\/+$/g,''));
     },
     update:async function(patch){
-      await restFetchJson(restUrl(rootPath),{
-        method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch||{})
-      });
+      // V31 : pas de PATCH à la racine pour le Gérant. Chaque chemin modifié
+      // est écrit à son propre emplacement autorisé par les règles.
+      for(const [path,val] of Object.entries(patch||{})){
+        await restFetchJson(restUrl(rootPath+'/'+String(path).replace(/^\/+|\/+$/g,'')),{
+          method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(val)
+        });
+      }
       return true;
     },
     on:function(event,success,error){
@@ -696,40 +703,33 @@ function createRestRoot(tenantKey){
       }
     },
     transaction:async function(updateFn){
-      // Transaction REST avec ETag/If-Match pour éviter le double remboursement.
-      for(let attempt=0;attempt<6;attempt++){
-        const get=await restFetchJson(restUrl(rootPath),{headers:{'X-Firebase-ETag':'true'}});
-        const etag=get.response.headers.get('ETag');
-        const current=get.data||{};
-        const next=updateFn(deepClone(current));
-        if(next===undefined) return {committed:false,snapshot:makeSnapshot(current)};
-        const headers={'Content-Type':'application/json'};
-        if(etag) headers['If-Match']=etag;
-        const controller=(typeof AbortController!=='undefined')?new AbortController():null;
-        const timer=controller?setTimeout(function(){controller.abort();},12000):null;
-        try{
-          await ensureFirebaseToken();
-          let resp=await fetch(addAuthToUrl(restUrl(rootPath)),{
-            method:'PUT',headers:headers,body:JSON.stringify(next),cache:'no-store',
-            signal:controller?controller.signal:undefined
-          });
-          if((resp.status===401||resp.status===403) && fbRefreshToken){
-            await refreshFirebaseIdToken();
-            resp=await fetch(addAuthToUrl(restUrl(rootPath)),{
-              method:'PUT',headers:headers,body:JSON.stringify(next),cache:'no-store',
-              signal:controller?controller.signal:undefined
-            });
-          }
-          if(resp.status===412){ continue; }
-          if(!resp.ok) throw new Error('Transaction serveur '+resp.status);
-          let data=null; try{data=await resp.json();}catch(e){data=next;}
-          return {committed:true,snapshot:makeSnapshot(data||next)};
-        }catch(e){
-          if(e && e.name==='AbortError') throw new Error('Transaction : délai dépassé');
-          throw e;
-        }finally{ if(timer) clearTimeout(timer); }
+      // V31 : le compte Gérant n'écrit plus toute la salle d'un seul PUT.
+      // On calcule la nouvelle racine, puis on écrit seulement les nœuds réellement
+      // modifiés. Cela respecte les règles Firebase qui protègent config/postes/tarifs.
+      const get=await restFetchJson(restUrl(rootPath));
+      const current=get.data||{};
+      const next=updateFn(deepClone(current));
+      if(next===undefined) return {committed:false,snapshot:makeSnapshot(current)};
+
+      const allKeys=new Set([...Object.keys(current||{}),...Object.keys(next||{})]);
+      const changed=[];
+      for(const key of allKeys){
+        const a=Object.prototype.hasOwnProperty.call(current,key)?current[key]:undefined;
+        const b=Object.prototype.hasOwnProperty.call(next,key)?next[key]:undefined;
+        if(JSON.stringify(a)!==JSON.stringify(b)) changed.push(key);
       }
-      throw new Error('Transaction en conflit, réessayez');
+      if(!changed.length) return {committed:true,snapshot:makeSnapshot(next)};
+
+      // Écrit chaque nœud enfant séparément : active_by_poste, sessions, daily, etc.
+      // Les nœuds protégés ne sont jamais envoyés par le Gérant.
+      for(const key of changed){
+        const val=Object.prototype.hasOwnProperty.call(next,key)?next[key]:null;
+        await restFetchJson(restUrl(rootPath+'/'+key),{
+          method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(val)
+        });
+      }
+      if(fbForcePoll) setTimeout(fbForcePoll,40);
+      return {committed:true,snapshot:makeSnapshot(next)};
     }
   };
 }
@@ -870,26 +870,22 @@ function rootReadActive(root,p,idx){
   const map=(root.active_by_poste && typeof root.active_by_poste==='object')?root.active_by_poste:{};
   const key=remotePostKey(p&&p.num);
   const mapped=map[key]&&typeof map[key]==='object'?map[key]:null;
+  // V31 : active_by_poste est la source officielle. Le vieux tableau n'est
+  // utilisé qu'en secours si ce poste n'a encore jamais été migré dans la map.
+  if(mapped) return mapped;
   let legacy=null;
   const sid=p&&p.sessionId;
-  if(sid){ legacy=arr.find(function(x){return x&&x.sessionId===sid;})||null; }
+  if(sid) legacy=arr.find(function(x){return x&&x.sessionId===sid;})||null;
   if(!legacy && Number.isInteger(idx) && idx>=0) legacy=arr[idx]||null;
-  if(mapped && legacy){
-    // Prend l'entrée la plus récente. Une nouvelle activation V24 possède startedAt.
-    return remoteStamp(legacy)>remoteStamp(mapped)?legacy:mapped;
-  }
-  return mapped||legacy||{};
+  return legacy||{};
 }
 function rootWriteActive(root,p,idx,state){
   root=root||{};
   const arr=Array.isArray(root.active_postes)?root.active_postes.slice():[];
-  const sid=(state&&state.sessionId)||(p&&p.sessionId)||'';
-  let ai=-1;
-  if(sid) ai=arr.findIndex(function(x){return x&&x.sessionId===sid;});
-  if(ai<0 && Number.isInteger(idx) && idx>=0) ai=idx;
-  if(ai<0) ai=arr.length;
   const st=Object.assign({},state||{}, {updatedAt:Number((state||{}).updatedAt)||Date.now()});
-  arr[ai]=deepClone(st);
+  // V31 : ne recherche plus un index par sessionId (cela pouvait déplacer
+  // l'état d'un poste vers un autre). L'index du poste reste fixe.
+  if(Number.isInteger(idx) && idx>=0) arr[idx]=deepClone(st);
   root.active_postes=arr;
   root.active_by_poste=(root.active_by_poste && typeof root.active_by_poste==='object')?Object.assign({},root.active_by_poste):{};
   root.active_by_poste[remotePostKey(p&&p.num)]=deepClone(st);
@@ -1089,11 +1085,32 @@ function resetRoomCode(){
 // autorise le CORS. Remplace l'URL ci-dessous par celle de TON Worker
 // une fois déployé (ex: https://tuya-relay.tonpseudo.workers.dev).
 
+const CP1_DEVICE_IDS={
+  'poste1':'bfe898207ecd75437dx5fw',
+  'poste2':'bfba8b667e37b21c5dxnqz',
+  'pote2':'bfba8b667e37b21c5dxnqz',
+  'poste3':'bf3928e0c6b5baa56eobvv',
+  'poste4':'bf77859fcb75e26cf11f4o',
+  'poste5':'bf7b869fe5f118b73dauab',
+  'poste6':'bf4f7b47b4f9ec2451fgex'
+};
+function normalizedPosteName(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
+function resolvedDeviceId(poste){
+  const key=normalizedPosteName(poste&&poste.num);
+  if(String(currentTenantKey||'').toUpperCase()==='GZ-07732' && CP1_DEVICE_IDS[key]) return CP1_DEVICE_IDS[key];
+  return String((poste&&poste.devid)||'').trim();
+}
+const tuyaPowerEpoch={};
+function beginPowerAction(poste){
+  const id=resolvedDeviceId(poste); if(!id) return {id:'',epoch:0};
+  const epoch=(tuyaPowerEpoch[id]||0)+1; tuyaPowerEpoch[id]=epoch; return {id,epoch};
+}
 const TUYA_WORKER_URL = 'https://gamezone-tuya-bah.bahmamadou4234.workers.dev';
 
 // Envoie une commande ON/OFF à une prise via le Cloud Tuya (par le Worker Cloudflare)
 async function tuyaCommand(poste, turnOn){
-  if(!poste || !poste.devid){
+  const resolvedId=resolvedDeviceId(poste);
+  if(!poste || !resolvedId){
     console.log('Prise non configurée pour', poste&&poste.num);
     return false;
   }
@@ -1111,7 +1128,7 @@ async function tuyaCommand(poste, turnOn){
         'Content-Type': 'application/json',
         'Authorization': 'Bearer '+idToken
       },
-      body: JSON.stringify({ tenantKey: currentTenantKey, devid: poste.devid, turnOn }),
+      body: JSON.stringify({ tenantKey: currentTenantKey, devid: resolvedId, turnOn }),
       cache:'no-store',
       signal:controller?controller.signal:undefined
     });
@@ -1140,18 +1157,20 @@ function readPendingOff(){
   }catch(e){return {};}
 }
 function savePendingOff(poste,raison){
-  if(!poste || !poste.devid) return;
+  const rid=resolvedDeviceId(poste);
+  if(!poste || !rid) return;
   const all=readPendingOff();
-  all[String(poste.devid)]={
-    num:poste.num||'Poste',devid:poste.devid,ip:poste.ip||'',finTs:Number(poste.finTs)||0,
+  all[String(rid)]={
+    num:poste.num||'Poste',devid:rid,ip:poste.ip||'',finTs:Number(poste.finTs)||0,
     raison:raison||'timer',savedAt:Date.now()
   };
   try{gzStorageSet(pendingOffKey(),JSON.stringify(all));}catch(e){}
 }
 function clearPendingOff(poste){
-  if(!poste || !poste.devid) return;
+  const rid=resolvedDeviceId(poste)||String((poste&&poste.devid)||'');
+  if(!poste || !rid) return;
   const all=readPendingOff();
-  delete all[String(poste.devid)];
+  delete all[String(rid)];
   try{gzStorageSet(pendingOffKey(),JSON.stringify(all));}catch(e){}
 }
 let pendingOffRetryBusy=false;
@@ -1176,44 +1195,41 @@ async function retryPendingOffs(){
 }
 
 async function allumerPrise(poste){
-  addJournal('p', `🔌 ${poste.num} — Commande allumage`, `IP: ${poste.ip||'—'}`, '');
+  const action=beginPowerAction(poste);
+  if(!action.id){showToast(`⚠️ ${poste&&poste.num||'Poste'} — prise non configurée`);return false;}
+  addJournal('p', `🔌 ${poste.num} — Commande allumage`, `Device: ${action.id}`, '');
   let ok=false;
   for(let n=0;n<3 && !ok;n++){
+    if(tuyaPowerEpoch[action.id]!==action.epoch) return false; // une commande OFF plus récente a priorité
     if(n>0) await sleepMs(700*n);
+    if(tuyaPowerEpoch[action.id]!==action.epoch) return false;
     ok=await tuyaCommand(poste,true);
   }
   if(ok) showToast(`✅ Prise ${poste.num} allumée`);
-  else showToast(`⚡ ${poste.num} activé · Internet/Tuya indisponible, allumez la TV manuellement`);
+  else showToast(`⚡ ${poste.num} activé · commande TV non confirmée`);
   return ok;
 }
 
 async function eteindrePrise(poste, raison='manuel'){
-  // Sécurité : une coupure automatique par fin de temps ne peut JAMAIS
-  // être envoyée avant l'heure exacte de fin enregistrée.
-  if(raison==='timer' && Number(poste&&poste.finTs)>0 && Date.now()<Number(poste.finTs)){
-    console.warn('Commande OFF bloquée avant 00:00 pour',poste.num);
-    return false;
-  }
+  const action=beginPowerAction(poste); // annule immédiatement toute ancienne tentative ON
+  if(!action.id) return true;
+  if(raison==='timer' && Number(poste&&poste.finTs)>0 && Date.now()<Number(poste.finTs)) return false;
 
-  // À la fin du temps, on insiste plusieurs fois. Une seule panne réseau/Tuya
-  // ne doit plus laisser la télévision allumée.
-  const essais=(raison==='timer')?5:3;
+  // V31 : mémorise OFF AVANT la première tentative. Même si la page est fermée
+  // pendant l'appel réseau, la prochaine ouverture reprendra la coupure.
+  savePendingOff(Object.assign({},poste,{devid:action.id}),raison);
+  const essais=(raison==='timer')?6:4;
   let ok=false;
   for(let n=0;n<essais && !ok;n++){
-    if(n>0) await sleepMs(Math.min(3500,700*Math.pow(2,n-1)));
-    ok=await tuyaCommand(poste,false);
+    if(n>0) await sleepMs(Math.min(3000,600*Math.pow(2,n-1)));
+    ok=await tuyaCommand(Object.assign({},poste,{devid:action.id}),false);
   }
-
   if(ok){
-    clearPendingOff(poste);
+    clearPendingOff(Object.assign({},poste,{devid:action.id}));
     addJournal('r', `🔌 ${poste.num} — Prise éteinte`, `Motif: ${raison}`, '');
     showToast(`🔴 Prise ${poste.num} éteinte`);
   }else{
-    // On garde la commande OFF en attente et on la renvoie automatiquement
-    // dès que la connexion revient, puis toutes les quelques secondes.
-    savePendingOff(poste,raison);
-    addJournal('y', `⚠️ ${poste.num} — Coupure prise en attente`, `Motif: ${raison} · nouvelles tentatives automatiques`, '');
-    showToast(`⚠️ ${poste.num} terminé · coupure TV en nouvelle tentative`);
+    showToast(`⚠️ ${poste.num} à 00:00 · OFF TV sera retenté automatiquement`);
   }
   return ok;
 }
@@ -1304,7 +1320,7 @@ function initApp(){
   postes=cfg.map((c,i)=>{
     const legacy=saved[i]||{};
     const mapped=savedMap[remotePostKey(c.num)]||null;
-    const r=(mapped && remoteStamp(mapped)>=remoteStamp(legacy))?mapped:legacy;
+    const r=mapped||legacy;
     return {
       ...c,
       actif:!!r.actif,
@@ -1745,7 +1761,7 @@ async function confirmerSession(){
     if(fbForcePoll) setTimeout(fbForcePoll,120);
 
     const pNow=postes[idx]||p;
-    if(pNow.devid) await allumerPrise(pNow);
+    if(resolvedDeviceId(pNow)) await allumerPrise(pNow);
     else showToast('✓ '+pNow.num+' activé — '+tarif.lbl);
   }catch(e){
     console.log('Erreur démarrage session synchronisée:',e);
@@ -2153,7 +2169,7 @@ async function pausePoste(i,auto=false){
     }
   }catch(e){ console.log('Pause serveur différée:',e); }
   addJournal('y',`${deviceSnapshot.num} — Pause`,`${deviceSnapshot.client} · ${Math.floor(rest/60)} min restantes${auto?' · protection coupure':''}`,'');
-  if(!auto && deviceSnapshot.devid) await eteindrePrise(deviceSnapshot,'pause');
+  if(!auto && resolvedDeviceId(deviceSnapshot)) await eteindrePrise(deviceSnapshot,'pause');
   showToast(auto?`⚡ ${deviceSnapshot.num} mis en pause — temps protégé`:`⏸ ${deviceSnapshot.num} en pause — temps arrêté`);
 }
 
@@ -2180,7 +2196,7 @@ async function reprendrePoste(i){
     const refreshed=postes[i]||deviceSnapshot;
     const rest=remainingSec(refreshed);
     addJournal('g',`${deviceSnapshot.num} — Reprise`,`${deviceSnapshot.client} · ${Math.floor(rest/60)} min restantes`,'');
-    if(deviceSnapshot.devid) await allumerPrise(deviceSnapshot);
+    if(resolvedDeviceId(deviceSnapshot)) await allumerPrise(deviceSnapshot);
     else showToast(`▶ ${deviceSnapshot.num} repris`);
   }catch(e){console.log('Erreur reprise:',e);showToast('⚠️ Reprise impossible — réessayez');}
 }
@@ -2808,7 +2824,7 @@ setInterval(async ()=>{
         // Priorité absolue à la télévision : envoyer OFF dès que 00:00 est atteint,
         // AVANT même de fermer la session Firebase. Ainsi une panne Firebase
         // ne peut plus empêcher la coupure de la prise.
-        if(deviceSnapshot.devid && !p._offAttempted){
+        if(resolvedDeviceId(deviceSnapshot) && !p._offAttempted){
           p._offAttempted=true;
           showToast(`⏱ ${deviceSnapshot.num} à 00:00 — coupure prise`);
           await eteindrePrise(deviceSnapshot,'timer');
@@ -2843,7 +2859,7 @@ setInterval(async ()=>{
 
         renderPostes(); updateStats();
 
-        if(!deviceSnapshot.devid){
+        if(!resolvedDeviceId(deviceSnapshot)){
           showToast(`⏱ ${deviceSnapshot.num} — Temps écoulé`);
         }
       }
