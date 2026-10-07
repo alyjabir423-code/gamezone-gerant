@@ -1,4 +1,4 @@
-const CACHE='gamezone-gerant-v33-align-voice';
+const CACHE='gamezone-gerant-v34-align-voice';
 const ASSETS=['./','./index.html','./manifest.webmanifest'];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)).then(()=>self.skipWaiting()));
