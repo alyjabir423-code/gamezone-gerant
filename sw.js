@@ -1,4 +1,4 @@
-const CACHE='gamezone-gerant-v37-gym-camera-directe';
+const CACHE='gamezone-gerant-v38-gym-recettes-minuteur';
 const ASSETS=['./','./index.html','./manifest.webmanifest'];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)).then(()=>self.skipWaiting()));
