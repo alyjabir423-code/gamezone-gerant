@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone Gérant V50 — Recettes protégées</title>
+<title>GameZone Gérant V51 — Recettes et postes synchronisés</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -732,6 +732,15 @@ async function restFetchJson(url,opts,_retried){
 function makeSnapshot(value){
   return { val:function(){ return deepClone(value); } };
 }
+function gzIsFinancialCounterPath(path){
+  const bits=String(path||'').split('/');
+  const off=bits[0]==='daily' ? 2 : 1;
+  if(bits[0]!=='sessions' && bits[0]!=='daily')return false;
+  if(bits.length===off+1 && (bits[off]==='recettes'||bits[off]==='count'))return true;
+  if(bits.length===off+2 && ['parPoste','sessionsParPoste','payStats'].includes(bits[off]))return true;
+  return false;
+}
+
 function createRestRoot(tenantKey){
   const rootPath='gz_'+tenantKey;
   return {
@@ -832,7 +841,7 @@ function createRestRoot(tenantKey){
       const eq=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
       const putDelta=(path,a,b)=>{
         if(eq(a,b))return;
-        if(typeof b==='number' && Number.isFinite(b) && typeof a==='number' && Number.isFinite(a)){
+        if(gzIsFinancialCounterPath(path) && typeof b==='number' && Number.isFinite(b) && typeof a==='number' && Number.isFinite(a)){
           const delta=b-a;if(delta!==0)patch[path]={'.sv':{'increment':delta}};
           return;
         }
@@ -882,6 +891,11 @@ function createRestRoot(tenantKey){
         if(!eq(live,beforePosts[num]===undefined?null:beforePosts[num])){
           throw new Error('Le poste a changé sur un autre téléphone. Rechargez avant de réessayer.');
         }
+      }
+      if(!rollover && Object.keys(patch).some(k=>k==='sessions'||k.startsWith('sessions/')||k.startsWith('daily/'))){
+        const freshSession=(await restFetchJson(restUrl(rootPath+'/sessions'))).data||{};
+        if(String(freshSession.date||'')!==String(current.sessions&&current.sessions.date||''))
+          throw new Error('La journée de gestion a changé : actualisez avant toute nouvelle vente.');
       }
       await restFetchJson(restUrl(rootPath),{
         method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)
