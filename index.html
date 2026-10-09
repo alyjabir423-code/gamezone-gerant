@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone CI — Gérant V40 Barres couleurs + Utilisation postes</title>
+<title>GameZone CI — Gérant V44 Synchronisation TV vérifiée</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -1006,7 +1006,7 @@ function rootWriteActive(root,p,idx,state){
 }
 function blankRemoteActive(base){
   return Object.assign({},base||{}, {
-    actif:false,client:'',finTs:0,tempsTotal:0,dureeMin:0,
+    actif:false,starting:false,startingUntil:0,cleanup:false,cleanupUntil:0,client:'',finTs:0,tempsTotal:0,dureeMin:0,
     paused:false,pauseRemainingSec:0,montantSession:0,montantJourSession:0,
     paiementsSession:{},sessionId:'',startedAt:0,
     bonus:false,bonusOnly:false,bonusSource:'',bonusDurationMin:0,bonusMinutesAdded:0,bonusGrantedAt:0,
@@ -1211,8 +1211,8 @@ const CP1_DEVICE_IDS={
 };
 function normalizedPosteName(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
 function resolvedDeviceId(poste){
-  const key=normalizedPosteName(poste&&poste.num);
-  if(String(currentTenantKey||'').toUpperCase()==='GZ-07732' && CP1_DEVICE_IDS[key]) return CP1_DEVICE_IDS[key];
+  // V45 : Firebase est la source unique de l'identifiant de prise.
+  // Ne jamais remplacer une association récente par un ancien ID codé en dur.
   return String((poste&&poste.devid)||'').trim();
 }
 const tuyaPowerEpoch={};
@@ -1250,7 +1250,7 @@ async function tuyaCommand(poste, turnOn){
     let data=null;
     try{ data=await resp.json(); }catch(e){}
     console.log('Tuya cloud response (via Worker):', data);
-    return !!(resp.ok && data && data.success);
+    return !!(resp.ok && data && data.success) && await gzVerifySwitchG(poste,turnOn);
   } catch(e){
     console.log('Commande Tuya (cloud) echouee:', e);
     return false;
@@ -1260,6 +1260,26 @@ async function tuyaCommand(poste, turnOn){
 }
 
 function sleepMs(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}
+
+// V44: un succès HTTP du Worker signifie commande ACCEPTÉE, pas prise réellement ON/OFF.
+async function gzReadSwitchStateG(poste){
+  const devid=resolvedDeviceId(poste);if(!devid)return null;
+  const token=await ensureFirebaseToken();if(!token)return null;
+  const r=await fetch(TUYA_WORKER_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+    body:JSON.stringify({tenantKey:currentTenantKey,action:'status',devid}),cache:'no-store'});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.success||!d.device)return null;
+  return d.device.online===true && typeof d.device.switchOn==='boolean'?d.device.switchOn:null;
+}
+async function gzVerifySwitchG(poste,expected){
+  for(let n=0;n<5;n++){
+    if(n)await sleepMs(550);
+    try{const v=await gzReadSwitchStateG(poste);if(v===expected)return true;}
+    catch(e){console.log('Statut prise indisponible:',e);}
+  }
+  return false;
+}
+
 
 function pendingOffKey(){
   return 'gz_pending_off_'+String(currentTenantKey||'default');
@@ -1297,7 +1317,7 @@ async function retryPendingOffs(){
   pendingOffRetryBusy=true;
   try{
     for(const p of list){
-      const newActive=(postes||[]).find(x=>x&&resolvedDeviceId(x)===resolvedDeviceId(p)&&x.actif&&remainingSec(x)>0);
+      const newActive=(postes||[]).find(x=>x&&resolvedDeviceId(x)===resolvedDeviceId(p)&&(x.actif&&remainingSec(x)>0 || x.starting&&Date.now()<Number(x.startingUntil||0)));
       if(newActive){clearPendingOff(p);continue;} // ne pas éteindre une nouvelle séance en cours
       const ok=await tuyaCommand(p,false);
       if(ok){
@@ -1312,7 +1332,6 @@ async function retryPendingOffs(){
 }
 
 async function allumerPrise(poste){
-  clearPendingOff(poste); // ON confirmé par une action client : une vieille extinction ne doit plus s'exécuter
   const action=beginPowerAction(poste);
   if(!action.id){showToast(`⚠️ ${poste&&poste.num||'Poste'} — prise non configurée`);return false;}
   addJournal('p', `🔌 ${poste.num} — Commande allumage`, `Device: ${action.id}`, '');
@@ -1323,7 +1342,7 @@ async function allumerPrise(poste){
     if(tuyaPowerEpoch[action.id]!==action.epoch) return false;
     ok=await tuyaCommand(poste,true);
   }
-  if(ok) showToast(`✅ Prise ${poste.num} allumée`);
+  if(ok){clearPendingOff(poste);showToast(`✅ Prise ${poste.num} allumée`);}
   else showToast(`⚡ ${poste.num} activé · commande TV non confirmée`);
   return ok;
 }
@@ -1540,6 +1559,7 @@ function initApp(){
     return {
       ...c,
       actif:!!r.actif,
+      starting:!!r.starting,startingUntil:Number(r.startingUntil)||0,
       client:r.client||'',
       finTs:Number(r.finTs)||0,
       tempsTotal:Number(r.tempsTotal)||0,
@@ -1938,97 +1958,79 @@ function openStart(i){
 
 async function confirmerSession(){
   const lockKey='start-'+modalPosteIdx;
-  if(actionLocks.has(lockKey)) return;
+  if(actionLocks.has(lockKey))return;
   actionLocks.add(lockKey);
+  let idx=-1,p=null,sid='',reserved=false,powered=false;
   try{
     const nom=document.getElementById('ms-nom').value.trim();
-    if(!nom){showToast('⚠️ Entrez le nom du client');return;}
-    if(!selDuree){showToast('⚠️ Choisissez une durée');return;}
-    const idx=modalPosteIdx;
-    const p=postes[idx];
-    if(!p || p.actif){showToast('⚠️ Ce poste est déjà occupé');return;}
-    const tarif=tarifsForPoste(p).find(function(t){return Number(t.min)===Number(selDuree);});
-    if(!tarif){showToast('⚠️ Tarif introuvable');return;}
-    const prix=money(tarif.prix);
-    const duree=minutesNum(selDuree);
-    if(prix<=0 || duree<=0){showToast('⚠️ Tarif ou durée invalide');return;}
-    const payKey=selPay;
-    const payLbl=((PAYS.find(function(x){return x.id===payKey;})||{}).lbl)||payKey;
-    const now=Date.now();
-    const sessionId=String(p.num)+'-'+now+'-'+Math.random().toString(36).slice(2,8);
-
-    const newActive={
-      actif:true,client:nom,finTs:now+duree*60000,tempsTotal:duree*60,dureeMin:duree,
-      paused:false,pauseRemainingSec:0,montantSession:prix,montantJourSession:prix,
-      paiementsSession:{},sessionId:sessionId,startedAt:now,updatedAt:now
-    };
-    newActive.paiementsSession[payKey]=prix;
-
-    if(!fbRoot || typeof fbRoot.transaction!=='function'){
-      showToast('⚠️ Serveur non prêt — réessayez');
-      return;
-    }
-
-    // Transaction sur la racine Firebase : on part TOUJOURS de l'état réel
-    // du serveur. Ainsi deux téléphones ne peuvent plus se réécrire avec un
-    // ancien total de recettes ou masquer un poste activé ailleurs.
-    const tx=await fbRoot.transaction(function(root){
-      root=root||{};
-      const remote=rootReadActive(root,p,idx)||{};
-      if(remote.actif){ return undefined; }
-      rootWriteActive(root,p,idx,newActive);
-
-      const ss=freshSessionSnapshotFromRoot(root);
-      ss.recettes=money(ss.recettes)+prix;
+    if(!nom)return showToast('⚠️ Entrez le nom du client');
+    if(!selDuree)return showToast('⚠️ Choisissez une durée');
+    idx=modalPosteIdx;p=postes[idx];
+    if(!p||p.actif)return showToast('⚠️ Poste déjà occupé');
+    const tarif=tarifsForPoste(p).find(x=>Number(x.min)===Number(selDuree));
+    if(!tarif)return showToast('⚠️ Tarif introuvable');
+    const prix=money(tarif.prix),duree=minutesNum(selDuree),payKey=selPay;
+    if(prix<=0||duree<=0)return showToast('⚠️ Tarif invalide');
+    if(!fbRoot)return showToast('⚠️ Connexion Firebase indisponible');
+    if(!resolvedDeviceId(p))return showToast('⚠️ '+p.num+' : prise Tuya non configurée. Aucun temps ni recette démarrés.');
+    sid=String(p.num)+'-'+Date.now()+'-'+Math.random().toString(36).slice(2,8);
+    const payLbl=((PAYS.find(x=>x.id===payKey)||{}).lbl)||payKey;
+    // ÉTAPE 1 : réservation temporaire, compteur arrêté et aucune recette ajoutée.
+    const reserve=await fbRoot.transaction(root=>{
+      root=root||{};const r=rootReadActive(root,p,idx)||{};
+      if(r.actif||(r.starting&&Date.now()<Number(r.startingUntil||0))||(r.cleanup&&Date.now()<Number(r.cleanupUntil||0)))return undefined;
+      rootWriteActive(root,p,idx,{actif:false,starting:true,startingUntil:Date.now()+45000,
+        client:nom,sessionId:sid,finTs:0,paused:false,montantSession:0,updatedAt:Date.now()});
+      return root;
+    });
+    if(!reserve||!reserve.committed)return showToast('⚠️ Poste occupé ou activation en cours');
+    reserved=true;
+    showToast('⏳ Vérification allumage '+p.num+' ...');
+    // ÉTAPE 2 : la prise doit être réellement ON, sinon on ne démarre pas le compteur.
+    powered=await allumerPrise(p);
+    if(!powered)throw new Error('Prise non allumée ou statut Tuya non confirmé : temps non activé');
+    // ÉTAPE 3 : compteur et recette une seule fois, seulement après confirmation ON.
+    const tx=await fbRoot.transaction(root=>{
+      root=root||{};const r=rootReadActive(root,p,idx)||{};
+      if(!r.starting||r.sessionId!==sid||r.actif)return undefined;
+      const now=Date.now();
+      const active={actif:true,starting:false,startingUntil:0,client:nom,finTs:now+duree*60000,
+        tempsTotal:duree*60,dureeMin:duree,paused:false,pauseRemainingSec:0,montantSession:prix,
+        montantJourSession:prix,paiementsSession:{[payKey]:prix},sessionId:sid,startedAt:now,updatedAt:now};
+      rootWriteActive(root,p,idx,active);
+      const ss=freshSessionSnapshotFromRoot(root);ss.recettes=money(ss.recettes)+prix;
       ss.parPoste[p.num]=money(ss.parPoste[p.num])+prix;
       ss.sessionsParPoste[p.num]=Math.max(0,Math.floor(Number(ss.sessionsParPoste[p.num])||0))+1;
       ss.payStats[payKey]=money(ss.payStats[payKey])+prix;
-      root.sessions=ss;
-      root.daily=root.daily||{};
-      root.daily[businessDateKey(new Date())]=deepClone(ss);
+      root.sessions=ss;root.daily=root.daily||{};root.daily[businessDateKey(new Date(now))]=deepClone(ss);
       return root;
     });
-
-    if(!tx || !tx.committed){
-      if(fbForcePoll) await fbForcePoll();
-      showToast('⚠️ Ce poste vient d’être activé sur un autre téléphone');
-      return;
-    }
-
-    const rootNow=tx.snapshot&&typeof tx.snapshot.val==='function'?tx.snapshot.val():null;
-    if(rootNow){
-      DB._cache=rootNow;
-      // Le serveur est la vérité : aucune protection locale ne doit bloquer
-      // l'affichage du nouvel état sur cet appareil.
-      localRevenueMutationUntil=0;
-      localStateMutationUntil=0;
-      refreshFromRemote();
-    }else{
-      // Repli local immédiat, suivi d'une lecture forcée.
-      Object.assign(p,newActive);
-      recettes=money(recettes)+prix;
-      recettesParPoste[p.num]=money(recettesParPoste[p.num])+prix;
-      sessionsParPoste[p.num]=Math.max(0,Math.floor(Number(sessionsParPoste[p.num])||0))+1;
-      payStats[payKey]=money(payStats[payKey])+prix;
-      renderPostes(); updateStats();
-    }
-
-    addJournal('g',String(p.num)+' — Session démarrée',nom+' · Début '+fmtClock(now,true)+' · Fin prévue '+fmtClock(now+duree*60000,true)+' · Temps activé '+fmtDurationSec(duree*60)+' · '+payLbl,prix.toLocaleString('fr-FR')+' F','',{poste:p.num,client:nom,sessionId:sessionId,typeActivite:'demarrage',debutTs:now,finPrevueTs:now+duree*60000,dureeSec:duree*60,montant:prix});
-    closeModal('mo-start');
-    renderPostes(); updateStats();
-    announceSessionStartOnce(sessionId,p.num,duree,false);
-    if(fbForcePoll) setTimeout(fbForcePoll,120);
-
-    const pNow=postes[idx]||p;
-    if(resolvedDeviceId(pNow)) await allumerPrise(pNow);
-    else showToast('✓ '+pNow.num+' activé — '+tarif.lbl);
+    if(!tx||!tx.committed)throw new Error('Séance modifiée sur un autre téléphone, activation annulée');
+    reserved=false;
+    syncFromTransactionResult(tx);
+    const startTs=Date.now();
+    addJournal('g',String(p.num)+' — Session démarrée',nom+' · Début '+fmtClock(startTs,true)+
+      ' · '+duree+' min · '+payLbl,prix.toLocaleString('fr-FR')+' F','',
+      {poste:p.num,client:nom,sessionId:sid,typeActivite:'demarrage',debutTs:startTs,dureeSec:duree*60,montant:prix});
+    closeModal('mo-start');renderPostes();updateStats();
+    announceSessionStartOnce(sid,p.num,duree,false);
+    showToast('✅ '+p.num+' — prise Tuya ON confirmée, temps démarré. Vérifie que la TV sort de veille.');
+    if(fbForcePoll)setTimeout(fbForcePoll,120);
   }catch(e){
-    console.log('Erreur démarrage session synchronisée:',e);
-    showToast('⚠️ Impossible de synchroniser la session — réessayez');
-    if(fbForcePoll) try{await fbForcePoll();}catch(_e){}
-  }finally{
-    setTimeout(function(){actionLocks.delete(lockKey);},700);
-  }
+    console.warn('Activation TV interrompue:',e);
+    showToast('⚠️ '+(e&&e.message||'Activation impossible'));
+    if(reserved&&fbRoot){
+      try{await fbRoot.transaction(root=>{root=root||{};const r=rootReadActive(root,p,idx)||{};
+        if(!r.starting||r.sessionId!==sid)return undefined;
+        rootWriteActive(root,p,idx,blankRemoteActive(r));return root;});}catch(ex){console.warn(ex);}
+    }
+    if(powered&&p){
+      // Ne jamais éteindre une séance nouvelle ouverte par un autre téléphone.
+      try{const snap=await fbRoot.once('value');const r=rootReadActive(snap.val()||{},p,idx)||{};
+        if(!r.actif&&!r.starting)await eteindrePrise(p,'activation_annulee');}catch(ex){console.warn(ex);}
+    }
+    if(fbForcePoll)try{await fbForcePoll();}catch(e){}
+  }finally{setTimeout(()=>actionLocks.delete(lockKey),650);}
 }
 
 // ══════════════════════════════════════
@@ -2437,33 +2439,24 @@ async function pausePoste(i,auto=false){
 
 
 async function reprendrePoste(i){
-  const p=postes[i];
-  if(!p || !p.actif || !p.paused) return;
-  const sid=p.sessionId||'';
-  const deviceSnapshot=Object.assign({},p);
-  if(!fbRoot){showToast('⚠️ Connexion serveur nécessaire pour reprendre');return;}
+  const p=postes[i];if(!p||!p.actif||!p.paused||!fbRoot)return;
+  const sid=p.sessionId||'',snap={...p};
   try{
-    const tx=await fbRoot.transaction(function(root){
-      root=root||{};
-      const remote=rootReadActive(root,deviceSnapshot,i)||{};
-      if(!remote.actif || !remote.paused || (sid && remote.sessionId && remote.sessionId!==sid)) return undefined;
-      const rest=Math.max(0,Number(remote.pauseRemainingSec)||0);
-      if(rest<=0) return undefined;
-      const u=Object.assign({},remote,{finTs:Date.now()+rest*1000,pauseRemainingSec:0,paused:false,updatedAt:Date.now()});
-      rootWriteActive(root,deviceSnapshot,i,u);
-      return root;
+    if(resolvedDeviceId(snap)&&!(await allumerPrise(snap)))return showToast('⚠️ TV non allumée — minuteur reste en pause');
+    const tx=await fbRoot.transaction(root=>{
+      root=root||{};const r=rootReadActive(root,snap,i)||{};
+      if(!r.actif||!r.paused||(sid&&r.sessionId!==sid))return undefined;
+      const rest=Math.max(0,Number(r.pauseRemainingSec)||0);if(!rest)return undefined;
+      rootWriteActive(root,snap,i,Object.assign({},r,{finTs:Date.now()+rest*1000,
+        pauseRemainingSec:0,paused:false,updatedAt:Date.now()}));return root;
     });
-    if(!tx || !tx.committed){if(fbForcePoll) await fbForcePoll();showToast('⚠️ Le poste a changé sur un autre téléphone');return;}
-    const rootNow=syncFromTransactionResult(tx);
-    const refreshed=postes[i]||deviceSnapshot;
-    const rest=remainingSec(refreshed);
-    gzSpeak(speechPosteName(deviceSnapshot.num)+', temps repris.');
-    addJournal('g',`${deviceSnapshot.num} — Reprise`,`${deviceSnapshot.client} · ${Math.floor(rest/60)} min restantes`,'');
-    if(resolvedDeviceId(deviceSnapshot)) await allumerPrise(deviceSnapshot);
-    else showToast(`▶ ${deviceSnapshot.num} repris`);
-  }catch(e){console.log('Erreur reprise:',e);showToast('⚠️ Reprise impossible — réessayez');}
+    if(!tx||!tx.committed){showToast('⚠️ Poste modifié sur un autre téléphone');return;}
+    syncFromTransactionResult(tx);
+    gzSpeak(speechPosteName(snap.num)+', temps repris.');
+    addJournal('g',snap.num+' — Reprise',snap.client||'Client','');
+    showToast('▶ '+snap.num+' repris — TV confirmée');
+  }catch(e){console.warn('Reprise:',e);showToast('⚠️ TV / réseau indisponible — réessayer');}
 }
-
 
 async function pauseTousPourCoupure(){
   const list=[];
@@ -2729,6 +2722,7 @@ function refreshFromRemote(){
     const p={
       ...c,
       actif:!!r.actif,
+      starting:!!r.starting,startingUntil:Number(r.startingUntil)||0,
       client:r.client||'',
       finTs:Number(r.finTs)||0,
       tempsTotal:Number(r.tempsTotal)||0,
@@ -3385,6 +3379,38 @@ window.GymProofFree=(function(){
     const token=await ensureFirebaseToken();const r=await fetch(TUYA_WORKER_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({tenantKey:currentTenantKey,action:'roomStatus'})});
     const d=await r.json().catch(()=>({}));if(!r.ok||!d.success)throw new Error(d.error||'Statut Tuya indisponible');return d.devices||[];
   }
+
+  // V44 : prise allumée sans séance, avec double contrôle : OFF différé sécurisé.
+  const gzOrphanCountsG=Object.create(null);
+  async function gzCheckOrphanG(i,st){
+    const p=postes[i];if(!p||!st||st.online!==true||st.switchOn!==true)return;
+    const devid=resolvedDeviceId(p);if(!devid)return;
+    if(p.actif||p.starting){gzOrphanCountsG[devid]=0;return;}
+    gzOrphanCountsG[devid]=(gzOrphanCountsG[devid]||0)+1;
+    if(gzOrphanCountsG[devid]<2||!fbRoot)return;
+    gzOrphanCountsG[devid]=0;
+    const tag='orphan-'+Date.now()+'-'+Math.random().toString(36).slice(2,5);
+    let locked=false;
+    try{
+      const tx=await fbRoot.transaction(root=>{
+        root=root||{};const r=rootReadActive(root,p,i)||{};
+        if(r.actif||(r.starting&&Date.now()<Number(r.startingUntil||0))||
+          (r.cleanup&&Date.now()<Number(r.cleanupUntil||0)))return undefined;
+        rootWriteActive(root,p,i,Object.assign({},r,{cleanup:true,cleanupUntil:Date.now()+15000,
+          cleanupTag:tag,updatedAt:Date.now()}));return root;
+      });
+      if(!tx||!tx.committed)return;
+      locked=true;
+      const ok=await eteindrePrise(p,'allumee_sans_seance');
+      setStatusBanner(ok?'🔴 '+p.num+' : prise allumée sans séance, arrêt confirmé.':
+        '⚠️ '+p.num+' : allumée sans séance. Commande OFF en attente, vérifier la TV.',ok?'info':'danger');
+    }catch(e){console.warn('Orphan TV:',e);}finally{
+      if(locked){try{await fbRoot.transaction(root=>{root=root||{};const r=rootReadActive(root,p,i)||{};
+        if(r.cleanupTag!==tag)return undefined;
+        rootWriteActive(root,p,i,Object.assign({},r,{cleanup:false,cleanupUntil:0,cleanupTag:'',updatedAt:Date.now()}));return root;});}catch(e){console.warn(e);}}
+    }
+  }
+
   // Pause distante validée avant modification locale : ne jamais figer le compte à rebours
   // si une reprise / nouvelle séance a été envoyée entre deux contrôles Tuya.
   async function gzPauseConfirmedG(i){
@@ -3451,7 +3477,7 @@ window.GymProofFree=(function(){
         const devid=resolvedDeviceId(p);if(!devid)continue;
         const st=by[devid];if(!st)continue;
         const rec=gzOffHistoryG[devid]||(gzOffHistoryG[devid]={});
-        if(!p.actif){delete gzOffHistoryG[devid];continue;}
+        if(!p.actif){delete gzOffHistoryG[devid];await gzCheckOrphanG(i,st);continue;}
         if(gzManualOffConfirmedG(rec,st,p,Date.now())){
           // Seul le OFF réellement observé après un ON dans cette même session déclenche une pause.
           if(await gzPauseConfirmedG(i)){
