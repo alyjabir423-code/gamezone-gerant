@@ -1,4 +1,4 @@
-const CACHE='gamezone-gerant-v40-progression-recettes';
+const CACHE='gamezone-gerant-v41-vocal-valide';
 const ASSETS=['./','./index.html','./manifest.webmanifest'];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)).then(()=>self.skipWaiting()));
