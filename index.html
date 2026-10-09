@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone Gérant V49 — Gestion Gérant</title>
+<title>GameZone Gérant V50 — Recettes protégées</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -899,6 +899,10 @@ const DB={
   _changeCb:null,
   get(k){ return this._cache[k]!==undefined ? this._cache[k] : null; },
   set(k,v){
+    if(['sessions','daily','corrections_rapport','patron_adjustment_once'].includes(String(k))){
+      console.warn('Écriture financière directe interdite côté Gérant :',k);
+      return Promise.reject(new Error('Modification manuelle des recettes réservée au Patron'));
+    }
     this._cache[k]=v;
     if(fbRoot) fbRoot.child(k).set(v).then(function(){if(fbForcePoll)setTimeout(fbForcePoll,40);}).catch(e=>console.log('Erreur Firebase:',e));
   },
@@ -917,6 +921,10 @@ const DB={
     cur[parts[parts.length-1]]=value;
   },
   setMulti(patch){
+    if(Object.keys(patch||{}).some(k=>/^(sessions|daily|corrections_rapport|patron_adjustment_once)(\/|$)/.test(k))){
+      console.warn('Écriture financière multiple directe interdite côté Gérant');
+      return Promise.reject(new Error('Modification manuelle des recettes réservée au Patron'));
+    }
     Object.entries(patch).forEach(([k,v])=>this._setCachePath(k,v));
     if(fbRoot) return fbRoot.update(patch).then(function(){if(fbForcePoll)setTimeout(fbForcePoll,40);return true;}).catch(e=>{console.log('Erreur Firebase (multi):',e);throw e;});
     return Promise.resolve();
@@ -1007,9 +1015,7 @@ let refundedSessions={};
 
 // Correction demandée par le gérant : remettre le rapport courant à 3 600 F
 // UNE SEULE FOIS le 05/10/2026, sans modifier les autres données du rapport.
-const BASELINE_FIX_DATE='2026-10-05';
-const BASELINE_FIX_AMOUNT=3600;
-const BASELINE_FIX_MARKER='fix_recettes_2026_10_05_3600_v2';
+// V50 : aucune valeur de recette fixée en dur, montant fourni exclusivement par Firebase.
 
 
 // V24 — synchro multi-appareils : chaque poste possède aussi une entrée
@@ -1675,8 +1681,7 @@ function initApp(){
   annulations=DB.get('annulations')||[];
   runtimeDayKey=businessDateKey(new Date());
 
-  // Applique une seule fois la correction du rapport courant vers 3 600 F.
-  applyRequestedBaselineFix();
+  // V50 : jamais de correction automatique de recettes chez le Gérant.
 
   // Les anciennes sessions créées avant l'ajout du montant pouvaient afficher 0 F.
   // On récupère alors le prix correspondant à leur durée sans ajouter une 2e recette.
@@ -1886,7 +1891,7 @@ function isOwnerPrivateHistory(e){
   return patron&&(e.visibilite==='patron'||type.includes('annul')||type.includes('pause')||type.includes('reprise')||type.includes('off_tv')||main.includes('annul')||main.includes('pause')||main.includes('reprise')||main.includes('off tv'));
 }
 function dayActivities(dayKey){
-  return Object.values(dayActivityMap(dayKey)).filter(e=>e && !isOwnerPrivateHistory(e) && !['regularisation_vente_reelle','recette_correction_patron'].includes(String(e.typeActivite||'')) && !String(e.id||'').startsWith('GZ_REGUL_')).sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0));
+  return Object.values(dayActivityMap(dayKey)).filter(e=>e && !isOwnerPrivateHistory(e) && !['regularisation_vente_reelle','recette_correction_patron','rapport_corrige','correction_recette','correction_rapport'].includes(String(e.typeActivite||'')) && !/correction\s+(de\s+)?recette|rapport\s+corrig[eé]|r[ée]gularisation/i.test(String(e.main||'')) && !String(e.id||'').startsWith('GZ_REGUL_')).sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0));
 }
 function persistActivity(entry){
   if(!entry || !entry.id) return;
@@ -2700,31 +2705,7 @@ function computeRevenue(){
   return {day,yesterday,week,month,total,perPoste};
 }
 
-async function applyRequestedBaselineFix(){
-  const key=businessDateKey(new Date());
-  if(key!==BASELINE_FIX_DATE || DB.get(BASELINE_FIX_MARKER)) return;
-  const oldRec=money(recettes);
-  recettes=BASELINE_FIX_AMOUNT;
-  updateStats();
-  if(!fbRoot) return;
-  try{
-    const tx=await fbRoot.transaction(function(root){
-      root=root||{};
-      if(root[BASELINE_FIX_MARKER]) return undefined;
-      const ss=freshSessionSnapshotFromRoot(root);
-      ss.recettes=BASELINE_FIX_AMOUNT;
-      root.sessions=ss;
-      root.daily=root.daily||{};
-      const oldDaily=root.daily[key]||{};
-      root.daily[key]=Object.assign({},oldDaily,ss,{recettes:BASELINE_FIX_AMOUNT});
-      root[BASELINE_FIX_MARKER]={done:true,ts:Date.now(),ancienMontant:money((root.sessions||{}).recettes||oldRec),nouveauMontant:BASELINE_FIX_AMOUNT};
-      return root;
-    });
-    if(tx&&tx.committed) syncFromTransactionResult(tx);
-    else if(fbForcePoll) await fbForcePoll();
-  }catch(e){console.log('Correction 3600 F en attente de synchronisation',e);}
-}
-
+// V50 : correctif historique de recettes désactivé (aucune écriture de référence fixe).
 
 // À 07:00, le compteur du nouveau jour repart automatiquement à zéro.
 // Le jour précédent reste dans daily/AAAA-MM-JJ et continue d'apparaître dans
@@ -2798,7 +2779,9 @@ function saveActive(){
 }
 
 function saveSessionsData(){
-  DB.set('sessions', sessionsSnapshot());
+  // V50 : une mise à jour locale ne doit pas écraser le montant Firebase.
+  if(fbForcePoll) setTimeout(function(){try{fbForcePoll();}catch(e){}},40);
+  return Promise.resolve(false);
 }
 
 // ══════════════════════════════════════
@@ -2874,50 +2857,7 @@ function refreshFromRemote(){
 }
 
 
-async function corrigerRapportDuJour(){
-  const recTxt=prompt('Recette RÉELLE du jour en FCFA :', String(money(recettes)));
-  if(recTxt===null) return;
-  const newRec=money(recTxt);
-  const doneTxt=prompt('Nombre RÉEL de sessions terminées aujourd’hui :', String(Math.max(0,Number(sessDone)||0)));
-  if(doneTxt===null) return;
-  const newDone=Math.max(0,Math.floor(Number(doneTxt)));
-  if(!Number.isFinite(newDone)){ showToast('⚠️ Nombre de sessions invalide'); return; }
-  const raison=(prompt('Raison de la correction :','Correction d’un faux rapport')||'').trim();
-  if(!raison){ showToast('⚠️ Indiquez la raison de la correction'); return; }
-
-  const oldRec=money(recettes);
-  const oldDone=Math.max(0,Number(sessDone)||0);
-  recettes=newRec;
-  sessDone=newDone;
-
-  const now=new Date();
-  correctionsRapport.unshift({
-    ts:now.getTime(),
-    dateKey:businessDateKey(now),
-    heure:String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0'),
-    ancienMontant:oldRec,
-    nouveauMontant:newRec,
-    ancienTerminees:oldDone,
-    nouveauTerminees:newDone,
-    raison,
-    gerant:currentUser||'—'
-  });
-  if(correctionsRapport.length>100) correctionsRapport=correctionsRapport.slice(0,100);
-
-  const snap=sessionsSnapshot();
-  const patch={
-    sessions:snap,
-    corrections_rapport:correctionsRapport
-  };
-  patch['daily/'+businessDateKey(now)]=snap;
-
-  localRevenueMutationUntil=Date.now()+3000;
-  await DB.setMulti(patch).catch(()=>showToast('⚠️ Synchronisation en attente'));
-  updateStats();
-  renderRapport();
-  addJournal('y','🛠 Rapport corrigé',`${oldRec.toLocaleString('fr-FR')} F → ${newRec.toLocaleString('fr-FR')} F · Terminées ${oldDone} → ${newDone}`,raison);
-  showToast('✅ Rapport du jour corrigé');
-}
+// V50 : pas de modification manuelle des recettes dans l’application Gérant.
 
 // ══════════════════════════════════════
 // HISTORIQUE JOURNALIER / MENSUEL

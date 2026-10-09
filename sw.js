@@ -1,5 +1,5 @@
 // Historique prive Patron / partage Gerant — version 49
-const CACHE='gz-gerant-historique-v49';
+const CACHE='gz-gerant-revenue-V51';
 const ASSETS=['./','./index.html','./manifest.webmanifest'];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)).then(()=>self.skipWaiting()));

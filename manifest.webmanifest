@@ -1,6 +1,6 @@
 {
-  "name": "GameZone CI — Gérant V49 — Contrôle recettes",
-  "short_name": "GameZone",
+  "name": "GameZone Gérant V51",
+  "short_name": "GZ Gérant",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
