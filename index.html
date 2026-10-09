@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone CI — Gérant V44 Synchronisation TV vérifiée</title>
+<title>GameZone Gérant V49 — Gestion Gérant</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -346,6 +346,7 @@ button,.ni,.pc-btn{touch-action:manipulation}
 })();
 
 </script>
+<!-- VERSION_GITHUB_PAGES_GERANT_V49 : ce fichier va UNIQUEMENT dans le dépôt gamezone-gerant. -->
 </head>
 <body>
 
@@ -1048,12 +1049,45 @@ function rootWriteActive(root,p,idx,state){
   root.active_by_poste[remotePostKey(p&&p.num)]=deepClone(st);
   return st;
 }
+
+// V49/V27 : bonus cumulatif PAR SÉANCE payante, PS3/PS4/PS5 uniquement.
+// Aucune recette ajoutée. La propriété gzAutoBonusGrantedMin évite le double crédit.
+function gzBonusEligibleMin(consoleType,totalPaid){
+  const kind=String(consoleType||'').toUpperCase().replace(/\s+/g,'');
+  if(!/(PS3|PS4|PS5|PLAYSTATION3|PLAYSTATION4|PLAYSTATION5)/.test(kind))return 0;
+  const amount=Math.max(0,Number(totalPaid)||0);
+  if(amount<1000)return 0;
+  const isPS3=/(PS3|PLAYSTATION3)/.test(kind);
+  if(amount>=2000)return isPS3?30:25;
+  if(amount>=1500)return isPS3?25:20;
+  return isPS3?20:15;
+}
+function gzApplyAutomaticBonus(state,consoleType){
+  if(!state || !state.actif || state.bonusOnly)return 0;
+  const entitlement=gzBonusEligibleMin(consoleType,state.montantSession);
+  const already=Math.max(0,Number(state.gzAutoBonusGrantedMin)||0);
+  const additional=Math.max(0,entitlement-already);
+  if(additional<=0)return 0;
+  if(state.paused)state.pauseRemainingSec=(Number(state.pauseRemainingSec)||0)+additional*60;
+  else state.finTs=(Number(state.finTs)||Date.now())+additional*60000;
+  state.tempsTotal=(Number(state.tempsTotal)||0)+additional*60;
+  state.dureeMin=(Number(state.dureeMin)||0)+additional;
+  state.gzAutoBonusGrantedMin=entitlement;
+  state.gzAutoBonusConsole=String(consoleType||'');
+  state.bonusMinutesAdded=(Number(state.bonusMinutesAdded)||0)+additional;
+  state.bonusDurationMin=(Number(state.bonusDurationMin)||0)+additional;
+  state.bonus=true;
+  if(!state.bonusSource)state.bonusSource='automatique';
+  state.bonusGrantedAt=Date.now();
+  return additional;
+}
+
 function blankRemoteActive(base){
   return Object.assign({},base||{}, {
     actif:false,starting:false,startingUntil:0,cleanup:false,cleanupUntil:0,client:'',finTs:0,tempsTotal:0,dureeMin:0,
     paused:false,pauseRemainingSec:0,montantSession:0,montantJourSession:0,
     paiementsSession:{},sessionId:'',startedAt:0,
-    bonus:false,bonusOnly:false,bonusSource:'',bonusDurationMin:0,bonusMinutesAdded:0,bonusGrantedAt:0,
+    bonus:false,bonusOnly:false,bonusSource:'',bonusDurationMin:0,bonusMinutesAdded:0,bonusGrantedAt:0,gzAutoBonusGrantedMin:0,gzAutoBonusConsole:'',
     updatedAt:Date.now()
   });
 }
@@ -1757,7 +1791,7 @@ function renderPostes(){
   const bonusRest=bonusActifs.length?Math.min(...bonusActifs.map(x=>remainingSec(x))):0;
   const bonusTone=bonusActifs.length?gzProgressTone(bonusRest,bonusActifs.every(x=>x.paused)):'';
   const bonusBar='<div class="gz-yellow-meta">⏱ BONUS — '+(bonusActifs.length?'Temps en cours':'Aucun bonus actif')+'</div><div class="gz-yellow-progress"><div class="gz-yellow-fill '+bonusTone+'" style="width:'+bonusPct.toFixed(2)+'%"></div></div>';
-  bonus.innerHTML='<div class="bonus-title">🎁 CASE 7 — BONUS CLIENT FIDÈLE</div><div class="bonus-note">Bonus pour les clients fidèles — veuillez contacter le Patron.</div><span class="bonus-readonly">👁 Affichage seulement · Gérant</span>'+bonusBar+live;
+  bonus.innerHTML='<div class="bonus-title">🎁 CASE 7 — BONUS CLIENT FIDÈLE</div><div class="bonus-note">Bonus automatique : PS3 1 000/1 500/2 000 F → 20/25/30 min ; PS4/PS5 → 15/20/25 min. Bonus manuel Patron conservé.</div><span class="bonus-readonly">👁 Affichage seulement · Gérant</span>'+bonusBar+live;
   grid.appendChild(bonus);
 
   document.getElementById('s-libre').textContent=`${libres} libre${libres>1?'s':''}`;
@@ -1843,8 +1877,16 @@ function dayActivityMap(dayKey){
   }
   return (v&&typeof v==='object')?v:{};
 }
+function isOwnerPrivateHistory(e){
+  if(!e)return false;
+  const role=String(e.actorRole||e.gerant||'').trim().toLowerCase();
+  const main=String(e.main||'').toLowerCase();
+  const type=String(e.typeActivite||'').toLowerCase();
+  const patron=(role==='patron'||main.includes('par le patron')||e.visibilite==='patron');
+  return patron&&(e.visibilite==='patron'||type.includes('annul')||type.includes('pause')||type.includes('reprise')||type.includes('off_tv')||main.includes('annul')||main.includes('pause')||main.includes('reprise')||main.includes('off tv'));
+}
 function dayActivities(dayKey){
-  return Object.values(dayActivityMap(dayKey)).filter(Boolean).sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0));
+  return Object.values(dayActivityMap(dayKey)).filter(e=>e && !isOwnerPrivateHistory(e) && !['regularisation_vente_reelle','recette_correction_patron'].includes(String(e.typeActivite||'')) && !String(e.id||'').startsWith('GZ_REGUL_')).sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0));
 }
 function persistActivity(entry){
   if(!entry || !entry.id) return;
@@ -1877,7 +1919,7 @@ function addJournal(color,main,detail,amount,motif='',meta={}){
 function mergedCurrentActivities(){
   const byId={};
   dayActivities(businessDateKey(new Date())).forEach(e=>{if(e&&e.id)byId[e.id]=e;});
-  journal.forEach(e=>{if(e&&e.id)byId[e.id]=e;});
+  journal.forEach(e=>{if(e&&e.id&&!isOwnerPrivateHistory(e))byId[e.id]=e;});
   return Object.values(byId).sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0)).slice(0,120);
 }
 function activeJournalRows(){
@@ -2020,6 +2062,7 @@ async function confirmerSession(){
     if(!fbRoot)return showToast('⚠️ Connexion Firebase indisponible');
     if(!resolvedDeviceId(p))return showToast('⚠️ '+p.num+' : prise Tuya non configurée. Aucun temps ni recette démarrés.');
     sid=String(p.num)+'-'+Date.now()+'-'+Math.random().toString(36).slice(2,8);
+    let autoBonusStartG=0;
     const payLbl=((PAYS.find(x=>x.id===payKey)||{}).lbl)||payKey;
     // ÉTAPE 1 : réservation temporaire, compteur arrêté et aucune recette ajoutée.
     const reserve=await fbRoot.transaction(root=>{
@@ -2043,6 +2086,7 @@ async function confirmerSession(){
       const active={actif:true,starting:false,startingUntil:0,client:nom,finTs:now+duree*60000,
         tempsTotal:duree*60,dureeMin:duree,paused:false,pauseRemainingSec:0,montantSession:prix,
         montantJourSession:prix,paiementsSession:{[payKey]:prix},sessionId:sid,startedAt:now,updatedAt:now};
+      autoBonusStartG=gzApplyAutomaticBonus(active,p.type);
       rootWriteActive(root,p,idx,active);
       const ss=freshSessionSnapshotFromRoot(root);ss.recettes=money(ss.recettes)+prix;
       ss.parPoste[p.num]=money(ss.parPoste[p.num])+prix;
@@ -2058,6 +2102,7 @@ async function confirmerSession(){
     addJournal('g',String(p.num)+' — Session démarrée',nom+' · Début '+fmtClock(startTs,true)+
       ' · '+duree+' min · '+payLbl,prix.toLocaleString('fr-FR')+' F','',
       {poste:p.num,client:nom,sessionId:sid,typeActivite:'demarrage',debutTs:startTs,dureeSec:duree*60,montant:prix});
+    if(autoBonusStartG>0)addJournal('p',p.num+' — 🎁 Bonus automatique',nom+' · '+p.type+' · +'+autoBonusStartG+' minutes gratuites (0 F)','0 F','',{poste:p.num,client:nom,sessionId:sid,typeActivite:'bonus_auto',dureeAjouteeSec:autoBonusStartG*60,montant:0});
     closeModal('mo-start');renderPostes();updateStats();
     announceSessionStartOnce(sid,p.num,duree,false);
     showToast('✅ '+p.num+' — prise Tuya ON confirmée, temps démarré. Vérifie que la TV sort de veille.');
@@ -2094,37 +2139,45 @@ function openPlus(i){
 async function confirmerPlus(){
   const idx=modalPosteIdx;
   const p=postes[idx];
-  const lockKey='plus-'+(p&&p.sessionId?p.sessionId:idx);
-  if(actionLocks.has(lockKey)) return;
+  if(!p){showToast('⚠️ Poste introuvable');return;}
+  const lockKey='plus-poste-'+String(p.num);
+  if(actionLocks.has(lockKey))return;
   actionLocks.add(lockKey);
   try{
-    if(!p || !p.actif || isClosedSession(p)){showToast('⚠️ Session introuvable');return;}
-    const tarif=tarifsForPoste(p).find(function(t){return Number(t.min)===Number(selPlusDuree);});
-    if(!tarif){showToast('⚠️ Tarif introuvable');return;}
-    const prix=money(tarif.prix);
-    const duree=minutesNum(selPlusDuree);
-    if(prix<=0 || duree<=0){showToast('⚠️ Tarif ou durée invalide');return;}
-    const payKey=selPlusPlay;
-    const payLbl=((PAYS.find(function(x){return x.id===payKey;})||{}).lbl)||payKey;
-    const sid=p.sessionId;
-    const baseDuree=minutesNum(p.dureeMin);
-    if(!fbRoot){showToast('⚠️ Serveur non prêt — réessayez');return;}
-
-    const tx=await fbRoot.transaction(function(root){
+    if(!fbRoot){showToast('⚠️ Connexion Firebase indisponible');return;}
+    const tarif=tarifsForPoste(p).find(t=>Number(t.min)===Number(selPlusDuree));
+    if(!tarif){showToast('⚠️ Tarif introuvable pour '+p.type);return;}
+    const prix=money(tarif.prix),duree=minutesNum(selPlusDuree),payKey=selPlusPlay;
+    if(prix<=0||duree<=0){showToast('⚠️ Tarif ou durée invalide');return;}
+    // Relire la séance OFFICIELLE sur Firebase avant chaque prolongation.
+    // Une synchronisation récente du Patron ne doit pas faire refuser +Temps.
+    const snapshot=await fbRoot.once('value');
+    const rootNow=snapshot.val()||{};
+    const current=rootReadActive(rootNow,p,idx)||{};
+    if(!current.actif||(!current.paused&&Number(current.finTs||0)<=Date.now())){
+      if(fbForcePoll)await fbForcePoll();
+      showToast('⚠️ Temps terminé ou poste libre. Actualisez puis démarrez une nouvelle séance.');return;
+    }
+    const sid=String(current.sessionId||'');
+    if(!sid){showToast('⚠️ Session sans identifiant — actualisez avant de prolonger');return;}
+    const baseDuree=minutesNum(current.dureeMin);
+    const client=current.client||'Client';
+    let autoBonusPlusG=0;
+    const result=await fbRoot.transaction(root=>{
       root=root||{};
       const remote=rootReadActive(root,p,idx)||{};
-      if(!remote.actif || (sid && remote.sessionId && remote.sessionId!==sid) || Number(remote.updatedAt||0)!==Number(p.updatedAt||0)) return undefined;
+      if(!remote.actif||remote.sessionId!==sid||(!remote.paused&&Number(remote.finTs||0)<=Date.now()))return undefined;
       const u=Object.assign({},remote);
-      if(u.paused) u.pauseRemainingSec=(Number(u.pauseRemainingSec)||0)+duree*60;
-      else u.finTs=(Number(u.finTs)||Date.now())+duree*60000;
+      if(u.paused)u.pauseRemainingSec=(Number(u.pauseRemainingSec)||0)+duree*60;
+      else u.finTs=Number(u.finTs)+duree*60000;
       u.tempsTotal=(Number(u.tempsTotal)||0)+duree*60;
       u.montantSession=money(u.montantSession)+prix;
       u.montantJourSession=money(u.montantJourSession)+prix;
       u.paiementsSession=Object.assign({},u.paiementsSession||{});
       u.paiementsSession[payKey]=money(u.paiementsSession[payKey])+prix;
+      autoBonusPlusG=gzApplyAutomaticBonus(u,p.type);
       u.updatedAt=Date.now();
       rootWriteActive(root,p,idx,u);
-
       const ss=freshSessionSnapshotFromRoot(root);
       ss.recettes=money(ss.recettes)+prix;
       ss.parPoste[p.num]=money(ss.parPoste[p.num])+prix;
@@ -2133,26 +2186,31 @@ async function confirmerPlus(){
       root.daily=root.daily||{};
       root.daily[businessDateKey(new Date())]=deepClone(ss);
       return root;
-    });
-    if(!tx || !tx.committed){
-      if(fbForcePoll) await fbForcePoll();
-      showToast('⚠️ Le poste a changé sur un autre téléphone — réessayez');
-      return;
+    },undefined,false);
+    if(!result||!result.committed){
+      if(fbForcePoll)await fbForcePoll();
+      showToast('⚠️ Séance modifiée entre-temps. Actualisez puis réessayez.');return;
     }
-    syncFromTransactionResult(tx);
-    { const pr=postes[idx]||p; const newTotal=Math.max(0,Number(pr.tempsTotal)||((baseDuree+duree)*60)); addJournal('b',`${p.num} — Prolongé`,`${p.client} · ${baseDuree} min + ${duree} min prolongé · Nouveau total ${fmtDurationSec(newTotal)} · Fin prévue ${pr.paused?'EN PAUSE':fmtClock(pr.finTs,true)} · ${payLbl}`,`${prix.toLocaleString('fr-FR')} F`,'',{poste:p.num,client:p.client,sessionId:sid,typeActivite:'prolongation',dureeAjouteeSec:duree*60,montant:prix}); }
+    const saved=syncFromTransactionResult(result)||{};
+    const updated=rootReadActive(saved,p,idx)||{};
+    const payLbl=((PAYS.find(x=>x.id===payKey)||{}).lbl)||payKey;
+    addJournal('b',p.num+' — Prolongé',client+' · '+baseDuree+' min + '+duree+' min prolongé · Nouveau total '+fmtDurationSec(Number(updated.tempsTotal)||0)+' · '+payLbl,prix.toLocaleString('fr-FR')+' F','',{poste:p.num,client,sessionId:sid,typeActivite:'prolongation',dureeAjouteeSec:duree*60,montant:prix});
+    // Déduire le bonus réellement gagné à partir de l'état confirmé, pour
+    // éviter de publier une annonce d'une transaction Firebase rejouée.
+    const newGranted=Math.max(0,Number(updated.gzAutoBonusGrantedMin)||0);
+    const previousGranted=Math.max(0,Number(current.gzAutoBonusGrantedMin)||0);
+    const extraGranted=Math.max(0,newGranted-previousGranted);
+    if(extraGranted>0)addJournal('p',p.num+' — 🎁 Bonus automatique',client+' · '+p.type+' · +'+extraGranted+' min gratuites (0 F)','0 F','',{poste:p.num,client,sessionId:sid,typeActivite:'bonus_auto',dureeAjouteeSec:extraGranted*60,montant:0});
     gzSpeak(speechPosteName(p.num)+', '+duree+' minutes supplémentaires ajoutées.');
-    showToast(`+${tarif.lbl} sur ${p.num}`);
-    closeModal('mo-plus'); renderPostes(); updateStats();
+    closeModal('mo-plus');renderPostes();updateStats();
+    showToast('✅ '+p.num+' : +'+duree+' min, +'+prix+' F enregistrés et synchronisés');
+    if(fbForcePoll)setTimeout(fbForcePoll,150);
   }catch(e){
-    console.log('Erreur prolongation synchronisée:',e);
-    showToast('⚠️ Prolongation non synchronisée — réessayez');
-    if(fbForcePoll) try{await fbForcePoll();}catch(_e){}
-  }finally{
-    setTimeout(function(){actionLocks.delete(lockKey);},700);
-  }
+    console.error('Ajout de temps Gérant:',e);
+    showToast('⚠️ Prolongation non enregistrée. Vérifiez Firebase et la connexion.');
+    if(fbForcePoll)try{await fbForcePoll();}catch(_){}
+  }finally{actionLocks.delete(lockKey);}
 }
-
 
 // ══════════════════════════════════════
 // MODAL STOP
@@ -2988,7 +3046,7 @@ function renderRapport(){
 
   // Historique des annulations du jour : poste, montant, temps joué/restant et raison.
   const todayKey=businessDateKey(new Date());
-  const cancels=(annulations||[]).filter(a=>a && a.dateKey===todayKey).sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const cancels=(annulations||[]).filter(a=>a && a.dateKey===todayKey && String(a.gerant||'').trim().toLowerCase()!=='patron' && a.actorRole!=='patron').sort((a,b)=>(b.ts||0)-(a.ts||0));
   document.getElementById('r-cancel-count').textContent=`${cancels.length} annulation${cancels.length>1?'s':''}`;
   const cl=document.getElementById('r-cancel-list');
   cl.innerHTML=cancels.length ? cancels.map(a=>{
@@ -3088,6 +3146,63 @@ document.querySelectorAll('.mo').forEach(el=>{el.addEventListener('click',functi
 
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
 
+
+// V49 : 00:00 doit libérer d'abord la séance dans Firebase, sans attendre Tuya.
+// Une courte réservation de nettoyage empêche un nouveau client de démarrer
+// pendant l'extinction. L'arrêt physique n'est jamais rejoué en retard.
+async function gzFinishExpiredG(i,p){
+  if(!p||!p.actif||p._ending)return;
+  const sid=p.sessionId||'';
+  const snapshot={...p};
+  p._ending=true;
+  try{
+    const result=await fbRoot.transaction(root=>{
+      root=root||{};
+      const live=rootReadActive(root,snapshot,i)||{};
+      if(!live.actif||(sid&&live.sessionId!==sid))return undefined;
+      const now=Date.now();
+      if(live.paused){if(Number(live.pauseRemainingSec||0)>0)return undefined;}
+      else if(!Number(live.finTs)||Number(live.finTs)>now)return undefined;
+      root.closed_sessions=root.closed_sessions||{};
+      const alreadyClosed=!!(sid&&root.closed_sessions[sid]);
+      const cleared=blankRemoteActive(live);
+      cleared.cleanup=true;cleared.cleanupUntil=now+20000;cleared.sessionId=sid;
+      rootWriteActive(root,snapshot,i,cleared);
+      const ss=freshSessionSnapshotFromRoot(root);
+      if(!alreadyClosed&&!live.bonusOnly)ss.count=Math.max(0,Number(ss.count)||0)+1;
+      root.sessions=ss;
+      root.daily=root.daily||{};
+      root.daily[businessDateKey(new Date(now))]=deepClone(ss);
+      if(sid&&!alreadyClosed)root.closed_sessions[sid]={status:live.bonusOnly?'bonus_termine':'terminee_auto',ts:now,dateKey:businessDateKey(new Date(now)),poste:snapshot.num,bonus:!!live.bonus};
+      return root;
+    });
+    if(!result||!result.committed){if(fbForcePoll)await fbForcePoll();return;}
+    syncFromTransactionResult(result);
+    renderPostes();updateStats();
+    gzSpeak('Temps terminé pour '+speechPosteName(snapshot.num)+'.');
+    addJournal('r',snapshot.num+' — Temps écoulé',(snapshot.client||'Client')+' · fin automatique',money(snapshot.montantSession)+' F','',{poste:snapshot.num,client:snapshot.client||'',sessionId:sid,typeActivite:'terminee_auto',tempsRestantSec:0,montant:money(snapshot.montantSession)});
+    // Commande OFF uniquement si la réservation de nettoyage appartient
+    // encore à CETTE séance (jamais à une séance suivante).
+    try{
+      const fresh=(await fbRoot.once('value')).val()||{};
+      const nowState=rootReadActive(fresh,snapshot,i)||{};
+      if(!nowState.actif&&nowState.cleanup&&nowState.sessionId===sid&&Date.now()<Number(nowState.cleanupUntil||0)){
+        if(resolvedDeviceId(snapshot)){
+          const off=await eteindrePrise(snapshot,'timer');
+          if(!off)showToast('⚠️ '+snapshot.num+' LIBRE, extinction prise non confirmée');
+        }
+      }
+    }catch(e){console.warn('Extinction après libération:',e);}
+    try{await fbRoot.transaction(root=>{
+      root=root||{};const a=rootReadActive(root,snapshot,i)||{};
+      if(a.actif||!a.cleanup||a.sessionId!==sid)return undefined;
+      rootWriteActive(root,snapshot,i,{...a,cleanup:false,cleanupUntil:0,sessionId:'',updatedAt:Date.now()});return root;
+    });}catch(e){console.warn('Nettoyage fin de séance:',e);}
+    if(fbForcePoll)await fbForcePoll();
+  }catch(e){console.warn('Fin automatique poste:',e);showToast('⚠️ '+snapshot.num+' : fin Firebase à synchroniser');}
+  finally{p._ending=false;}
+}
+
 // ══════════════════════════════════════
 // TIMER — COUPURE AUTOMATIQUE TUYA
 // ══════════════════════════════════════
@@ -3111,7 +3226,10 @@ setInterval(async ()=>{
       // Une session qui a déjà été fermée ailleurs ne doit jamais être
       // recomptée ni provoquer une nouvelle coupure de prise.
       if(isClosedSession(p)){
-        clearPosteState(p);
+        // Une ancienne fermeture peut être déjà journalisée, mais le poste
+        // peut encore être marqué actif dans Firebase. Il faut d’abord
+        // effectuer sa clôture atomique, sans doubler les ventes.
+        if(remainingSec(p)<=0)await gzFinishExpiredG(i,p);
         continue;
       }
 
@@ -3128,62 +3246,7 @@ setInterval(async ()=>{
       // qu'une fois l'heure de fin réellement atteinte. Aucune commande OFF
       // ne peut partir avant 00:00.
       if(rest<=0 && ((Number(p.finTs)>0 && Date.now()>=Number(p.finTs))||(p.paused&&Number(p.pauseRemainingSec)<=0))){
-        p._ending=true;
-        const deviceSnapshot={...p};
-
-        // V46: vérifier l'état Firebase FRESH avant toute extinction.
-        // Une prolongation reçue depuis le Patron empêche un OFF à tort.
-        try{
-          const latest=await fbRoot.once('value');
-          const r=rootReadActive(latest.val()||{},deviceSnapshot,i)||{};
-          if(!r.actif || r.sessionId!==deviceSnapshot.sessionId || r.paused ||
-             Number(r.finTs||0)>Date.now() || Number(r.updatedAt||0)!==Number(deviceSnapshot.updatedAt||0)){
-            p._ending=false;
-            if(fbForcePoll)await fbForcePoll();
-            continue;
-          }
-        }catch(e){p._ending=false;console.warn('Vérification avant OFF impossible',e);continue;}
-        if(resolvedDeviceId(deviceSnapshot) && !p._offAttempted){
-          p._offAttempted=true;
-          await eteindrePrise(deviceSnapshot,'timer');
-        }
-
-        const sid=deviceSnapshot.sessionId||'';
-        try{
-          const tx=await fbRoot.transaction(function(root){
-            root=root||{};
-            root.closed_sessions=root.closed_sessions||{};
-            if(sid && root.closed_sessions[sid]) return undefined;
-            const remote=rootReadActive(root,deviceSnapshot,i)||{};
-            if(!remote.actif || (sid && remote.sessionId && remote.sessionId!==sid) || Number(remote.finTs||0)>Date.now()) return undefined;
-            rootWriteActive(root,deviceSnapshot,i,blankRemoteActive(remote));
-            const ss=freshSessionSnapshotFromRoot(root);
-            if(!deviceSnapshot.bonusOnly) ss.count=Math.max(0,Number(ss.count)||0)+1;
-            root.sessions=ss;
-            root.daily=root.daily||{};
-            root.daily[businessDateKey(new Date())]=deepClone(ss);
-            if(sid) root.closed_sessions[sid]={status:deviceSnapshot.bonusOnly?'bonus_termine':'terminee_auto',ts:Date.now(),dateKey:businessDateKey(new Date()),poste:deviceSnapshot.num,bonus:!!deviceSnapshot.bonus};
-            return root;
-          });
-          if(tx&&tx.committed){
-            syncFromTransactionResult(tx);
-            gzSpeak((deviceSnapshot.bonusOnly?'Bonus terminé pour ':'Temps terminé pour ')+speechPosteName(deviceSnapshot.num)+'.');
-            { const totalSec=Math.max(0,Number(deviceSnapshot.tempsTotal)||0); if(deviceSnapshot.bonusOnly){addJournal('p',`${deviceSnapshot.num} — 🎁 Bonus terminé`,`${deviceSnapshot.client} · Début ${deviceSnapshot.startedAt?fmtClock(deviceSnapshot.startedAt,true):'—'} · Fin ${fmtClock(Date.now(),true)} · Bonus offert ${fmtDurationSec(totalSec)}`,'0 F','',{poste:deviceSnapshot.num,client:deviceSnapshot.client,sessionId:sid,typeActivite:'bonus_termine',bonus:true,debutTs:deviceSnapshot.startedAt||0,finTs:Date.now(),dureeSec:totalSec,montant:0});}else{addJournal('r',`${deviceSnapshot.num} — Temps écoulé`,`${deviceSnapshot.client} · Début ${deviceSnapshot.startedAt?fmtClock(deviceSnapshot.startedAt,true):'—'} · Fin ${fmtClock(Date.now(),true)} · Temps activé ${fmtDurationSec(totalSec)} · Temps utilisé ${fmtDurationSec(totalSec)} · fin automatique`,`${money(deviceSnapshot.montantSession).toLocaleString('fr-FR')} F`,'',{poste:deviceSnapshot.num,client:deviceSnapshot.client,sessionId:sid,typeActivite:'terminee_auto',debutTs:deviceSnapshot.startedAt||0,finTs:Date.now(),dureeSec:totalSec,tempsUtiliseSec:totalSec,tempsRestantSec:0,montant:money(deviceSnapshot.montantSession)});} }
-          }else{
-            p._ending=false;
-            if(fbForcePoll) await fbForcePoll();
-          }
-        }catch(e){
-          console.log('Fin automatique non synchronisée:',e);
-          p._ending=false;
-          continue;
-        }
-
-        renderPostes(); updateStats();
-
-        if(!resolvedDeviceId(deviceSnapshot)){
-          showToast(`⏱ ${deviceSnapshot.num} — Temps écoulé`);
-        }
+        await gzFinishExpiredG(i,p);
       }
     }
 
