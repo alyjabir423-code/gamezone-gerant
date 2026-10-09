@@ -746,6 +746,7 @@ function createRestRoot(tenantKey){
         }
       };
     },
+    once:async function(){ const got=await restFetchJson(restUrl(rootPath));return makeSnapshot(got.data||{}); },
     update:async function(patch){
       await restFetchJson(restUrl(rootPath),{
         method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch||{})
@@ -816,32 +817,75 @@ function createRestRoot(tenantKey){
       }
     },
     transaction:async function(updateFn){
-      // V31 : le compte Gérant n'écrit plus toute la salle d'un seul PUT.
-      // On calcule la nouvelle racine, puis on écrit seulement les nœuds réellement
-      // modifiés. Cela respecte les règles Firebase qui protègent config/postes/tarifs.
-      const get=await restFetchJson(restUrl(rootPath));
-      const current=get.data||{};
+      // V46 : PATCH Firebase multipath en UNE SEULE écriture, et incréments
+      // atomiques serveur pour les recettes. Jamais de PUT d'un total périmé.
+      // Les droits Firebase existants sont conservés (Gérant limité à ses noeuds).
+      if(gzOfflineMode || !navigator.onLine) throw new Error('Connexion interrompue : vente non enregistrée.');
+      const current=(await restFetchJson(restUrl(rootPath))).data||{};
       const next=updateFn(deepClone(current));
       if(next===undefined) return {committed:false,snapshot:makeSnapshot(current)};
-
-      const allKeys=new Set([...Object.keys(current||{}),...Object.keys(next||{})]);
-      const changed=[];
-      for(const key of allKeys){
-        const a=Object.prototype.hasOwnProperty.call(current,key)?current[key]:undefined;
-        const b=Object.prototype.hasOwnProperty.call(next,key)?next[key]:undefined;
-        if(JSON.stringify(a)!==JSON.stringify(b)) changed.push(key);
-      }
-      if(!changed.length) return {committed:true,snapshot:makeSnapshot(next)};
-
-      // Écrit chaque nœud enfant séparément : active_by_poste, sessions, daily, etc.
-      // Les nœuds protégés ne sont jamais envoyés par le Gérant.
+      const changed=Object.keys(next).filter(k=>JSON.stringify(current[k])!==JSON.stringify(next[k]));
+      for(const k of Object.keys(current))if(!Object.prototype.hasOwnProperty.call(next,k))changed.push(k);
+      if(!changed.length) return {committed:false,snapshot:makeSnapshot(current)};
+      const patch={};
+      const eq=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+      const putDelta=(path,a,b)=>{
+        if(eq(a,b))return;
+        if(typeof b==='number' && Number.isFinite(b) && typeof a==='number' && Number.isFinite(a)){
+          const delta=b-a;if(delta!==0)patch[path]={'.sv':{'increment':delta}};
+          return;
+        }
+        if(!b || typeof b!=='object' || Array.isArray(b) || !a || typeof a!=='object' || Array.isArray(a)){
+          patch[path]=(b===undefined?null:b);return;
+        }
+        const keys=new Set([...Object.keys(a),...Object.keys(b)]);
+        for(const k of keys) putDelta(path+'/'+k,a[k],b[k]);
+      };
       for(const key of changed){
-        const val=Object.prototype.hasOwnProperty.call(next,key)?next[key]:null;
-        await restFetchJson(restUrl(rootPath+'/'+key),{
-          method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(val)
-        });
+        const before=current[key],after=next[key];
+        // active_postes est un ancien miroir : active_by_poste est la référence
+        // officielle. Réécrire tout le tableau écraserait les autres téléphones.
+        if(key==='active_postes' && next.active_by_poste)continue;
+        if(key==='active_by_poste'){
+          const old=(before&&typeof before==='object')?before:{};
+          const fresh=(after&&typeof after==='object')?after:{};
+          for(const k of new Set([...Object.keys(old),...Object.keys(fresh)])){
+            if(!eq(old[k],fresh[k])) patch['active_by_poste/'+k]=(fresh[k]===undefined?null:fresh[k]);
+          }
+        }else if(key==='sessions' || key==='daily'){
+          if(key==='sessions' && before&&after&&before.date!==after.date){
+            // Véritable nouvelle journée à 07h : remise à zéro autorisée.
+            patch.sessions=after;
+          }else putDelta(key,before,after);
+        }else if(['closed_sessions','refunded_sessions','rollovers','activity_daily'].includes(key)){
+          putDelta(key,before||{},after||{});
+        }else{
+          patch[key]=(after===undefined?null:after);
+        }
       }
-      if(fbForcePoll) setTimeout(fbForcePoll,40);
+      if(!Object.keys(patch).length)return {committed:false,snapshot:makeSnapshot(current)};
+      // Une diminution de recettes est permise seulement avec une annulation
+      // enregistrée ou au passage officiel à la nouvelle journée.
+      const saleChange=(Number(next.sessions&&next.sessions.recettes)||0)-(Number(current.sessions&&current.sessions.recettes)||0);
+      const rollover=String(next.sessions&&next.sessions.date||'')!==String(current.sessions&&current.sessions.date||'');
+      const refund=changed.includes('refunded_sessions')||changed.includes('annulations');
+      if(saleChange<0 && !rollover && !refund){
+        throw new Error('Baisse de recette bloquée : aucune annulation associée.');
+      }
+      // Avant le PATCH, vérifier que la séance visée n'a pas évolué sur le
+      // téléphone Patron. Si elle a changé, refuser et demander de réessayer.
+      const beforePosts=(current.active_by_poste&&typeof current.active_by_poste==='object')?current.active_by_poste:{};
+      for(const key of Object.keys(patch).filter(k=>k.startsWith('active_by_poste/'))){
+        const num=key.slice('active_by_poste/'.length);
+        const live=(await restFetchJson(restUrl(rootPath+'/active_by_poste/'+num))).data;
+        if(!eq(live,beforePosts[num]===undefined?null:beforePosts[num])){
+          throw new Error('Le poste a changé sur un autre téléphone. Rechargez avant de réessayer.');
+        }
+      }
+      await restFetchJson(restUrl(rootPath),{
+        method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)
+      });
+      if(fbForcePoll)setTimeout(fbForcePoll,20);
       return {committed:true,snapshot:makeSnapshot(next)};
     }
   };
@@ -1291,7 +1335,8 @@ function readPendingOff(){
     return obj&&typeof obj==='object'?obj:{};
   }catch(e){return {};}
 }
-function savePendingOff(poste,raison){
+function savePendingOff(poste,raison){return; // V46: pas de coupure différée non contrôlée
+
   const rid=resolvedDeviceId(poste);
   if(!poste || !rid) return;
   const all=readPendingOff();
@@ -1309,7 +1354,8 @@ function clearPendingOff(poste){
   try{gzStorageSet(pendingOffKey(),JSON.stringify(all));}catch(e){}
 }
 let pendingOffRetryBusy=false;
-async function retryPendingOffs(){
+async function retryPendingOffs(){ return; // V46: ne jamais rejouer une ancienne commande OFF
+
   if(pendingOffRetryBusy || !navigator.onLine) return;
   const all=readPendingOff();
   const list=Object.values(all||{});
@@ -1366,7 +1412,7 @@ async function eteindrePrise(poste, raison='manuel'){
     addJournal('r', `🔌 ${poste.num} — Prise éteinte`, `Motif: ${raison}`, '');
     showToast(`🔴 Prise ${poste.num} éteinte`);
   }else{
-    showToast(`⚠️ ${poste.num} à 00:00 · OFF TV sera retenté automatiquement`);
+    showToast(`⚠️ ${poste.num} à 00:00 · OFF non confirmé — vérifier Smart Life`);
   }
   return ok;
 }
@@ -2067,7 +2113,7 @@ async function confirmerPlus(){
     const tx=await fbRoot.transaction(function(root){
       root=root||{};
       const remote=rootReadActive(root,p,idx)||{};
-      if(!remote.actif || (sid && remote.sessionId && remote.sessionId!==sid)) return undefined;
+      if(!remote.actif || (sid && remote.sessionId && remote.sessionId!==sid) || Number(remote.updatedAt||0)!==Number(p.updatedAt||0)) return undefined;
       const u=Object.assign({},remote);
       if(u.paused) u.pauseRemainingSec=(Number(u.pauseRemainingSec)||0)+duree*60;
       else u.finTs=(Number(u.finTs)||Date.now())+duree*60000;
@@ -3085,12 +3131,20 @@ setInterval(async ()=>{
         p._ending=true;
         const deviceSnapshot={...p};
 
-        // Priorité absolue à la télévision : envoyer OFF dès que 00:00 est atteint,
-        // AVANT même de fermer la session Firebase. Ainsi une panne Firebase
-        // ne peut plus empêcher la coupure de la prise.
+        // V46: vérifier l'état Firebase FRESH avant toute extinction.
+        // Une prolongation reçue depuis le Patron empêche un OFF à tort.
+        try{
+          const latest=await fbRoot.once('value');
+          const r=rootReadActive(latest.val()||{},deviceSnapshot,i)||{};
+          if(!r.actif || r.sessionId!==deviceSnapshot.sessionId || r.paused ||
+             Number(r.finTs||0)>Date.now() || Number(r.updatedAt||0)!==Number(deviceSnapshot.updatedAt||0)){
+            p._ending=false;
+            if(fbForcePoll)await fbForcePoll();
+            continue;
+          }
+        }catch(e){p._ending=false;console.warn('Vérification avant OFF impossible',e);continue;}
         if(resolvedDeviceId(deviceSnapshot) && !p._offAttempted){
           p._offAttempted=true;
-          showToast(`⏱ ${deviceSnapshot.num} à 00:00 — coupure prise`);
           await eteindrePrise(deviceSnapshot,'timer');
         }
 
@@ -3101,7 +3155,7 @@ setInterval(async ()=>{
             root.closed_sessions=root.closed_sessions||{};
             if(sid && root.closed_sessions[sid]) return undefined;
             const remote=rootReadActive(root,deviceSnapshot,i)||{};
-            if(!remote.actif || (sid && remote.sessionId && remote.sessionId!==sid)) return undefined;
+            if(!remote.actif || (sid && remote.sessionId && remote.sessionId!==sid) || Number(remote.finTs||0)>Date.now()) return undefined;
             rootWriteActive(root,deviceSnapshot,i,blankRemoteActive(remote));
             const ss=freshSessionSnapshotFromRoot(root);
             if(!deviceSnapshot.bonusOnly) ss.count=Math.max(0,Number(ss.count)||0)+1;
@@ -3477,13 +3531,10 @@ window.GymProofFree=(function(){
         const devid=resolvedDeviceId(p);if(!devid)continue;
         const st=by[devid];if(!st)continue;
         const rec=gzOffHistoryG[devid]||(gzOffHistoryG[devid]={});
-        if(!p.actif){delete gzOffHistoryG[devid];await gzCheckOrphanG(i,st);continue;}
+        if(!p.actif){delete gzOffHistoryG[devid];if(st.online===true && st.switchOn===true)setStatusBanner('⚠️ '+p.num+' : prise ON sans séance. Vérifier manuellement dans Smart Life.','warn');continue;}
         if(gzManualOffConfirmedG(rec,st,p,Date.now())){
           // Seul le OFF réellement observé après un ON dans cette même session déclenche une pause.
-          if(await gzPauseConfirmedG(i)){
-            addJournal('y',`${p.num} — arrêt manuel confirmé`,`${p.client||'Client'} · prise ON puis OFF à 4 contrôles successifs`,'');
-            setStatusBanner('⏸ '+speechPosteName(p.num)+' : arrêt manuel confirmé, temps protégé. Reprendre une fois la prise rallumée.','warn');
-          }
+          setStatusBanner('⚠️ '+speechPosteName(p.num)+' : prise OFF détectée. Le temps n’est pas mis en pause automatiquement.','warn');
         }
       }
     }catch(e){setStatusBanner('☁️ Service Tuya indisponible : aucune pause automatique, minuteurs conservés.','warn');}
