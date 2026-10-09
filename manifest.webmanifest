@@ -1,10 +1,10 @@
 {
-  "name": "GameZone Gérant V52.1",
+  "name": "GameZone Gérant V55",
   "short_name": "GZ Gérant",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#0d0d1a",
   "theme_color": "#0d0d1a",
-  "description": "GameZone Gérant V52.1 — correction minimale du contrôle de connexion avant Firebase"
+  "description": "GameZone Gérant V55 — audio après validation, alignement mobile, synchronisation des postes"
 }

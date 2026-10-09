@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone Gérant V52.1 — Vérification réseau Firebase</title>
+<title>GameZone Gérant V55 — Audio, +Temps et Pause corrigés</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -101,7 +101,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);display:flex;f
 .bonus-readonly{display:inline-flex;align-items:center;gap:5px;font-size:9px;font-weight:800;letter-spacing:.7px;text-transform:uppercase;padding:4px 8px;border-radius:20px;background:rgba(107,114,128,.12);color:var(--muted);border:1px solid rgba(107,114,128,.25)}
 .bonus-live-list{display:flex;flex-direction:column;gap:6px;margin-top:9px}
 .bonus-live{padding:7px 8px;border-radius:8px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.18);font-size:10px;color:var(--text);line-height:1.4}
-.bonus-tag{display:inline-block;margin-left:5px;padding:1px 6px;border-radius:20px;background:rgba(234,179,8,.12);color:var(--yellow);font-size:8px;font-weight:800;letter-spacing:.5px}
+.gz-auto-bonus-notice{font-size:10px;font-weight:800;color:#fbbf24;background:rgba(234,179,8,.09);border:1px solid rgba(234,179,8,.23);border-radius:7px;padding:5px 6px;line-height:1.4;margin:2px 0 6px}.gz-bonus-remaining{display:block;font-weight:700;color:#a7f3d0;margin-top:3px}.bonus-tag{display:inline-block;margin-left:5px;padding:1px 6px;border-radius:20px;background:rgba(234,179,8,.12);color:var(--yellow);font-size:8px;font-weight:800;letter-spacing:.5px}
 .pc-timer-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
 .pc-timer-row .pc-timer{margin-bottom:0}
 .pc-amount{font-family:var(--fd);font-size:14px;font-weight:700;color:var(--green);white-space:nowrap}
@@ -280,6 +280,20 @@ button,.ni,.pc-btn{touch-action:manipulation}
 .gz-yellow-fill.gz-progress-ok{background:#22c55e;box-shadow:0 0 6px #22c55e70}
 .gz-yellow-fill.gz-progress-mid{background:#facc15;box-shadow:0 0 6px #facc1570}
 .gz-yellow-fill.gz-progress-low{background:#ef4444;box-shadow:0 0 7px #ef444480}
+
+/* V54 — Alignement mobile des postes : aucune logique métier modifiée. */
+.pgrid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;grid-auto-flow:row}
+.pgrid>.pc,.pgrid>.bonus-card,.pgrid>.gym-card{box-sizing:border-box;min-width:0;width:100%;height:100%}
+.pgrid>.pc{display:flex;flex-direction:column;min-height:206px;overflow:hidden}
+.pc-top{min-width:0;gap:5px}.pc-num{min-width:0;overflow-wrap:anywhere;line-height:1.12}
+.pc-type,.pc-client,.pc-prise{min-width:0;overflow-wrap:anywhere}
+.pc-acts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:auto;padding-top:6px;align-items:stretch}
+.pc-acts>.pc-btn{box-sizing:border-box;min-width:0;width:100%;flex:none;font-size:10px;letter-spacing:0;overflow-wrap:anywhere;min-height:35px}
+.pc-acts>.pc-btn:nth-child(3){grid-column:1/-1}
+.pc-acts>.pc-btn:only-child{grid-column:1/-1}
+.pc-timer-row{min-width:0}.pc-timer-row .pc-timer{min-width:0;font-size:clamp(21px,6vw,27px);letter-spacing:1px}
+.pc-amount{font-size:clamp(11px,3vw,14px)}
+@media(max-width:350px){.pgrid{grid-template-columns:1fr}.pgrid>.pc{min-height:200px}}
 </style>
 <link rel="manifest" href="manifest.webmanifest">
 
@@ -763,6 +777,26 @@ function createRestRoot(tenantKey){
       });
       return true;
     },
+    pausePosteAtomic:async function(poste,sid){
+      const key=remotePostKey(poste&&poste.num);
+      // URL %2520 = clé de base contenant littéralement %20. Pas de clé différente !
+      const url=restUrl(rootPath+'/active_by_poste/'+encodeURIComponent(key));
+      const got=await restFetchJson(url,{headers:{'X-Firebase-ETag':'true'}});
+      const etag=got.response.headers.get('ETag');
+      const live=got.data;
+      if(!etag)throw new Error('Contrôle de concurrence Firebase indisponible : réessayez');
+      if(!live || !live.actif || live.paused || (sid&&live.sessionId!==sid))
+        throw new Error('Séance modifiée ou déjà en pause : actualisez');
+      let sec=0;
+      if(live.paused)sec=Math.max(0,Number(live.pauseRemainingSec)||0);
+      else sec=Math.max(0,Math.ceil((Number(live.finTs)||0-Date.now())/1000));
+      if(!sec)throw new Error('Séance déjà terminée');
+      const after=Object.assign({},live,{paused:true,pauseRemainingSec:sec,finTs:0,updatedAt:Date.now()});
+      // If-Match rejette toute tentative d'écraser une nouvelle séance ou prolongation.
+      await restFetchJson(url,{method:'PUT',headers:{'Content-Type':'application/json','if-match':etag},body:JSON.stringify(after)});
+      if(fbForcePoll)setTimeout(fbForcePoll,40);
+      return after;
+    },
     on:function(event,success,error){
       if(event!=='value') return;
 
@@ -832,7 +866,9 @@ function createRestRoot(tenantKey){
       // Les droits Firebase existants sont conservés (Gérant limité à ses noeuds).
       // L'état navigator.onLine peut être faux même quand Firebase est joignable.
       // Le fetch réseau ci-dessous décide réellement si une vente peut être enregistrée.
-      if(gzOfflineMode) throw new Error('Mode hors connexion : vente non enregistrée.');
+      // Toujours tester Firebase réellement : un drapeau réseau périmé ne doit pas refuser une vente.
+      // Si Firebase n'est pas joignable, restFetchJson échoue avant toute écriture.
+      // Aucun compteur ni recette ne démarre sans confirmation serveur.
       const current=(await restFetchJson(restUrl(rootPath))).data||{};
       const next=updateFn(deepClone(current));
       if(next===undefined) return {committed:false,snapshot:makeSnapshot(current)};
@@ -845,6 +881,14 @@ function createRestRoot(tenantKey){
         if(eq(a,b))return;
         if(gzIsFinancialCounterPath(path) && typeof b==='number' && Number.isFinite(b) && typeof a==='number' && Number.isFinite(a)){
           const delta=b-a;if(delta!==0)patch[path]={'.sv':{'increment':delta}};
+          return;
+        }
+        // V54 : nouvelle journée : jamais de PATCH sur daily/<jour> entier,
+        // interdit au Gérant par V38C. Décomposer en champs autorisés.
+        const financialRoot=path==='sessions'||path==='daily'||path.startsWith('sessions/')||path.startsWith('daily/');
+        if(financialRoot && b && typeof b==='object' && !Array.isArray(b) && (!a || (typeof a==='object'&&!Array.isArray(a)))){
+          const aa=(a&&typeof a==='object'&&!Array.isArray(a))?a:{};
+          for(const k of new Set([...Object.keys(aa),...Object.keys(b)])) putDelta(path+'/'+k,aa[k],b[k]);
           return;
         }
         if(!b || typeof b!=='object' || Array.isArray(b) || !a || typeof a!=='object' || Array.isArray(a)){
@@ -890,7 +934,8 @@ function createRestRoot(tenantKey){
       const beforePosts=(current.active_by_poste&&typeof current.active_by_poste==='object')?current.active_by_poste:{};
       for(const key of Object.keys(patch).filter(k=>k.startsWith('active_by_poste/'))){
         const num=key.slice('active_by_poste/'.length);
-        const live=(await restFetchJson(restUrl(rootPath+'/active_by_poste/'+num))).data;
+        // La clé Firebase contient déjà %20 : encoder une deuxième fois pour viser sa valeur littérale.
+        const live=(await restFetchJson(restUrl(rootPath+'/active_by_poste/'+encodeURIComponent(num)))).data;
         if(!eq(live,beforePosts[num]===undefined?null:beforePosts[num])){
           throw new Error('Le poste a changé sur un autre téléphone. Rechargez avant de réessayer.');
         }
@@ -1458,7 +1503,7 @@ async function eteindrePrise(poste, raison='manuel'){
   // V31 : mémorise OFF AVANT la première tentative. Même si la page est fermée
   // pendant l'appel réseau, la prochaine ouverture reprendra la coupure.
   savePendingOff(Object.assign({},poste,{devid:action.id}),raison);
-  const essais=(raison==='timer')?1:4; // fermeture rapide ; retries différés déjà en place
+  const essais=(raison==='timer'||raison==='pause')?1:4; // la pause ne bloque pas sur quatre essais réseau
   let ok=false;
   for(let n=0;n<essais && !ok;n++){
     if(n>0) await sleepMs(Math.min(3000,600*Math.pow(2,n-1)));
@@ -1469,7 +1514,7 @@ async function eteindrePrise(poste, raison='manuel'){
     addJournal('r', `🔌 ${poste.num} — Prise éteinte`, `Motif: ${raison}`, '');
     showToast(`🔴 Prise ${poste.num} éteinte`);
   }else{
-    showToast(`⚠️ ${poste.num} à 00:00 · OFF non confirmé — vérifier Smart Life`);
+    showToast(`⚠️ ${poste.num} · OFF non confirmé (${raison}) — vérifier Smart Life`);
   }
   return ok;
 }
@@ -1751,6 +1796,21 @@ function gzProgressTone(remainingSeconds, paused=false){
   return sec<=600?'gz-progress-mid':'gz-progress-ok';
 }
 
+// Lecture seule: minutes de bonus issues des ventes confirmées dans Firebase.
+// Elles sont consommées à la fin de la durée de la séance du client.
+function gzOfferedMinutesForPoste(a){
+  return Math.max(0,Math.floor(Number(a && (a.gzAutoBonusGrantedMin || a.bonusMinutesAdded || a.bonusDurationMin))||0));
+}
+function gzOfferedRemainingSeconds(a){
+  return Math.max(0,Math.min(remainingSec(a),gzOfferedMinutesForPoste(a)*60));
+}
+function gzBonusDisplayForPoste(a){
+  const min=gzOfferedMinutesForPoste(a);
+  return (a && a.actif && a.bonus && min>0)
+    ? '<div class="gz-auto-bonus-notice">🎁 BONUS AJOUTÉ : +'+min+' MIN GRATUITES<span class="gz-bonus-remaining">Bonus restant : '+fmtDurationSec(gzOfferedRemainingSeconds(a))+'</span></div>'
+    : '';
+}
+
 function renderPostes(){
   const grid=document.getElementById('postes-grid');
   if(!postes.length){
@@ -1787,7 +1847,8 @@ function renderPostes(){
         <div class="pc-amount">${p.actif?montant.toLocaleString('fr-FR')+' F':''}</div>
       </div>
       <div class="pc-bar-wrap"><div class="pc-bar ${bcls}" style="width:${pct}%"></div></div>
-      <div class="pc-client">${p.actif?p.client:'Disponible'}${p.actif&&p.bonus?'<span class="bonus-tag">🎁 BONUS</span>':''}</div>
+      <div class="pc-client">${p.actif?escapeHtml(p.client):'Disponible'}</div>
+      ${gzBonusDisplayForPoste(p)}
       <div class="pc-prise">${hasPrise?'🔌 Prise liée':'⚠️ Sans prise'}</div>
       <div class="pc-acts">
         ${expired?'<span class="pc-btn" style="grid-column:1/-1;text-align:center">⏳ Temps terminé — libération automatique</span>':p.actif
@@ -1807,12 +1868,14 @@ function renderPostes(){
   const bonus=document.createElement('div');
   bonus.className='bonus-card';
   const live=bonusActifs.length
-    ? '<div class="bonus-live-list">'+bonusActifs.map(p=>'<div class="bonus-live"><b>'+escapeHtml(speechPosteName(p.num))+'</b> · '+escapeHtml(p.client||'Client')+' · 🎁 '+Math.max(0,Number(p.bonusMinutesAdded||p.bonusDurationMin)||0)+' min offertes · restant '+fmtDurationSec(remainingSec(p))+'</div>').join('')+'</div>'
+    ? '<div class="bonus-live-list">'+bonusActifs.map(p=>'<div class="bonus-live"><b>'+escapeHtml(speechPosteName(p.num))+'</b> · '+escapeHtml(p.client||'Client')+' · 🎁 BONUS +'+gzOfferedMinutesForPoste(p)+' min gratuites · <strong>bonus restant '+fmtDurationSec(gzOfferedRemainingSeconds(p))+'</strong> · temps total poste '+fmtDurationSec(remainingSec(p))+'</div>').join('')+'</div>'
     : '<div class="bonus-live-list"><div class="bonus-live" style="color:var(--muted)">Aucun bonus en cours.</div></div>';
-  const bonusPct=bonusActifs.length ? Math.max(0,Math.min(100,100*bonusActifs.reduce((sum,x)=>sum+Math.min(remainingSec(x),Math.max(1,Number(x.bonusMinutesAdded||x.bonusDurationMin||0)*60||Number(x.tempsTotal)||1)),0)/Math.max(1,bonusActifs.reduce((sum,x)=>sum+Math.max(1,Number(x.bonusMinutesAdded||x.bonusDurationMin||0)*60||Number(x.tempsTotal)||1),0)))):0;
-  const bonusRest=bonusActifs.length?Math.min(...bonusActifs.map(x=>remainingSec(x))):0;
+  const bonusTotal=bonusActifs.reduce((s,x)=>s+gzOfferedMinutesForPoste(x)*60,0);
+  const bonusLeft=bonusActifs.reduce((s,x)=>s+gzOfferedRemainingSeconds(x),0);
+  const bonusPct=bonusTotal>0?Math.max(0,Math.min(100,100*bonusLeft/bonusTotal)):0;
+  const bonusRest=bonusActifs.length?Math.min(...bonusActifs.map(gzOfferedRemainingSeconds)):0;
   const bonusTone=bonusActifs.length?gzProgressTone(bonusRest,bonusActifs.every(x=>x.paused)):'';
-  const bonusBar='<div class="gz-yellow-meta">⏱ BONUS — '+(bonusActifs.length?'Temps en cours':'Aucun bonus actif')+'</div><div class="gz-yellow-progress"><div class="gz-yellow-fill '+bonusTone+'" style="width:'+bonusPct.toFixed(2)+'%"></div></div>';
+  const bonusBar='<div class="gz-yellow-meta">⏱ BONUS GRATUIT RESTANT — '+(bonusActifs.length?fmtDurationSec(bonusLeft):'Aucun bonus actif')+'</div><div class="gz-yellow-progress"><div class="gz-yellow-fill '+bonusTone+'" style="width:'+bonusPct.toFixed(2)+'%"></div></div>';
   bonus.innerHTML='<div class="bonus-title">🎁 CASE 7 — BONUS CLIENT FIDÈLE</div><div class="bonus-note">Bonus automatique : PS3 1 000/1 500/2 000 F → 20/25/30 min ; PS4/PS5 → 15/20/25 min. Bonus manuel Patron conservé.</div><span class="bonus-readonly">👁 Affichage seulement · Gérant</span>'+bonusBar+live;
   grid.appendChild(bonus);
 
@@ -2229,7 +2292,7 @@ async function confirmerPlus(){
     if(fbForcePoll)setTimeout(fbForcePoll,150);
   }catch(e){
     console.error('Ajout de temps Gérant:',e);
-    showToast('⚠️ Prolongation non enregistrée. Vérifiez Firebase et la connexion.');
+    showToast('⚠️ +Temps refusé : '+String(e&&e.message||'vérifiez Firebase et la connexion').slice(0,135));
     if(fbForcePoll)try{await fbForcePoll();}catch(_){}
   }finally{actionLocks.delete(lockKey);}
 }
@@ -2538,31 +2601,37 @@ async function confirmerAnnulation(){
 
 async function pausePoste(i,auto=false){
   const p=postes[i];
-  if(!p || !p.actif || p.paused) return;
+  if(!p||!p.actif||p.paused)return;
+  const lockKey='pause-poste-'+String(p.num);
+  if(actionLocks.has(lockKey))return;
+  actionLocks.add(lockKey);
   const sid=p.sessionId||'';
+  const before=Object.assign({},p);
   const rest=Math.max(0,remainingSec(p));
-  const deviceSnapshot=Object.assign({},p);
-  // Protection locale immédiate, même si le réseau vient de tomber.
-  p.pauseRemainingSec=rest; p.paused=true; p.finTs=0;
-  renderPostes(); updateStats();
+  // Feedback immédiat : le serveur confirmera avant la commande OFF.
+  p.pauseRemainingSec=rest;p.paused=true;p.finTs=0;
+  renderPostes();updateStats();
   try{
-    if(fbRoot){
-      const tx=await fbRoot.transaction(function(root){
-        root=root||{};
-        const remote=rootReadActive(root,deviceSnapshot,i)||{};
-        if(!remote.actif || (sid && remote.sessionId && remote.sessionId!==sid)) return undefined;
-        const u=Object.assign({},remote,{paused:true,pauseRemainingSec:rest,finTs:0,updatedAt:Date.now()});
-        rootWriteActive(root,deviceSnapshot,i,u);
-        return root;
-      });
-      if(tx&&tx.committed){syncFromTransactionResult(tx);if(!auto)gzSpeak(speechPosteName(deviceSnapshot.num)+', temps mis en pause.');}
+    if(!fbRoot || !fbRoot.pausePosteAtomic)throw new Error('Firebase indisponible');
+    const saved=await fbRoot.pausePosteAtomic(before,sid);
+    p.pauseRemainingSec=Math.max(0,Number(saved.pauseRemainingSec)||0);
+    p.paused=true;p.finTs=0;
+    renderPostes();updateStats();
+    if(!auto)gzSpeak(speechPosteName(before.num)+', temps mis en pause.');
+    addJournal('y',`${before.num} — Pause`,`${before.client} · ${Math.floor(p.pauseRemainingSec/60)} min restantes${auto?' · protection coupure':''}`,'');
+    showToast(auto?`⚡ ${before.num} : temps protégé`:`⏸ ${before.num} : pause confirmée — extinction en cours`);
+    if(!auto&&resolvedDeviceId(before)){
+      const ok=await eteindrePrise(before,'pause');
+      if(!ok)showToast('⚠️ '+before.num+' : temps en pause, mais OFF non confirmé. Vérifiez Smart Life.');
     }
-  }catch(e){ console.log('Pause serveur différée:',e); }
-  addJournal('y',`${deviceSnapshot.num} — Pause`,`${deviceSnapshot.client} · ${Math.floor(rest/60)} min restantes${auto?' · protection coupure':''}`,'');
-  if(!auto && resolvedDeviceId(deviceSnapshot)) await eteindrePrise(deviceSnapshot,'pause');
-  showToast(auto?`⚡ ${deviceSnapshot.num} mis en pause — temps protégé`:`⏸ ${deviceSnapshot.num} en pause — temps arrêté`);
+  }catch(e){
+    console.warn('Pause non enregistrée',e);
+    // Ne jamais conserver une fausse pause locale si Firebase l'a refusée.
+    Object.assign(p,before);renderPostes();updateStats();
+    showToast('⚠️ Pause non enregistrée : '+String(e&&e.message||'erreur réseau').slice(0,100));
+    if(fbForcePoll)try{await fbForcePoll();}catch(_){}
+  }finally{actionLocks.delete(lockKey);}
 }
-
 
 async function reprendrePoste(i){
   const p=postes[i];if(!p||!p.actif||!p.paused||!fbRoot)return;
@@ -2853,7 +2922,8 @@ function refreshFromRemote(){
   });
 
   // Si le Patron vient d'activer un poste ou d'offrir un bonus, le Gérant l'entend aussi.
-  postes.forEach(function(p){if(p&&p.actif&&p.sessionId)announceSessionStartOnce(p.sessionId,p.num,p.dureeMin,!!p.bonusOnly);});
+  // V54 : une simple synchronisation Firebase ne déclenche jamais une annonce d'activation.
+  // La voix part uniquement après la transaction confirmée (confirmerSession).
 
   const sess=DB.get('sessions')||{recettes:0,count:0,date:today()};
   if(sess.date===today()){
