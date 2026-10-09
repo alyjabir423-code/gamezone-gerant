@@ -1,5 +1,5 @@
 // Historique prive Patron / partage Gerant — version 49
-const CACHE='gz-gerant-V52-firebase-sec-20261009';
+const CACHE='gz-gerant-V52-1-network-check-20261009';
 const ASSETS=['./','./index.html','./manifest.webmanifest'];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)).then(()=>self.skipWaiting()));

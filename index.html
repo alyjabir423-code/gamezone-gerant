@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone Gérant V52 — Accès Firebase ciblés</title>
+<title>GameZone Gérant V52.1 — Vérification réseau Firebase</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -830,7 +830,9 @@ function createRestRoot(tenantKey){
       // V46 : PATCH Firebase multipath en UNE SEULE écriture, et incréments
       // atomiques serveur pour les recettes. Jamais de PUT d'un total périmé.
       // Les droits Firebase existants sont conservés (Gérant limité à ses noeuds).
-      if(gzOfflineMode || !navigator.onLine) throw new Error('Connexion interrompue : vente non enregistrée.');
+      // L'état navigator.onLine peut être faux même quand Firebase est joignable.
+      // Le fetch réseau ci-dessous décide réellement si une vente peut être enregistrée.
+      if(gzOfflineMode) throw new Error('Mode hors connexion : vente non enregistrée.');
       const current=(await restFetchJson(restUrl(rootPath))).data||{};
       const next=updateFn(deepClone(current));
       if(next===undefined) return {committed:false,snapshot:makeSnapshot(current)};
