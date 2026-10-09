@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone CI — Gérant V38 Gym Recettes + Minuteur + Caméra</title>
+<title>GameZone CI — Gérant V40 Barres couleurs + Utilisation postes</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -275,6 +275,11 @@ button,.ni,.pc-btn{touch-action:manipulation}
 .gz-yellow-progress{height:5px;background:#35324a;border-radius:7px;overflow:hidden;margin:7px 0 10px}
 .gz-yellow-fill{height:100%;background:#facc15;border-radius:7px;transition:width 1s linear;box-shadow:0 0 5px #facc1570}
 .gz-yellow-meta{font-size:10px;color:#fde68a;margin:4px 0 3px;font-variant-numeric:tabular-nums}
+
+/* V40/V17 — Barre Bonus + Gym, mêmes paliers que les postes TV. */
+.gz-yellow-fill.gz-progress-ok{background:#22c55e;box-shadow:0 0 6px #22c55e70}
+.gz-yellow-fill.gz-progress-mid{background:#facc15;box-shadow:0 0 6px #facc1570}
+.gz-yellow-fill.gz-progress-low{background:#ef4444;box-shadow:0 0 7px #ef444480}
 </style>
 <link rel="manifest" href="manifest.webmanifest">
 </head>
@@ -1571,6 +1576,14 @@ function orderedPostesEntries(list){
   return (list||[]).map((p,i)=>({p,i})).sort((a,b)=>posteOrderValue(a.p,a.i)-posteOrderValue(b.p,b.i));
 }
 
+
+// V40/V17 : vert > 15 minutes ; jaune de 15 à >5 minutes ; rouge de 5 min jusqu'à 00:00.
+function gzProgressTone(remainingSeconds, paused=false){
+  const sec=Math.max(0,Number(remainingSeconds)||0);
+  if(sec<=300)return 'gz-progress-low';
+  return (paused||sec<=900)?'gz-progress-mid':'gz-progress-ok';
+}
+
 function renderPostes(){
   const grid=document.getElementById('postes-grid');
   if(!postes.length){
@@ -1629,7 +1642,9 @@ function renderPostes(){
     ? '<div class="bonus-live-list">'+bonusActifs.map(p=>'<div class="bonus-live"><b>'+escapeHtml(speechPosteName(p.num))+'</b> · '+escapeHtml(p.client||'Client')+' · 🎁 '+Math.max(0,Number(p.bonusMinutesAdded||p.bonusDurationMin)||0)+' min offertes · restant '+fmtDurationSec(remainingSec(p))+'</div>').join('')+'</div>'
     : '<div class="bonus-live-list"><div class="bonus-live" style="color:var(--muted)">Aucun bonus en cours.</div></div>';
   const bonusPct=bonusActifs.length ? Math.max(0,Math.min(100,100*bonusActifs.reduce((sum,x)=>sum+Math.min(remainingSec(x),Math.max(1,Number(x.bonusMinutesAdded||x.bonusDurationMin||0)*60||Number(x.tempsTotal)||1)),0)/Math.max(1,bonusActifs.reduce((sum,x)=>sum+Math.max(1,Number(x.bonusMinutesAdded||x.bonusDurationMin||0)*60||Number(x.tempsTotal)||1),0)))):0;
-  const bonusBar='<div class="gz-yellow-meta">⏱ BONUS — '+(bonusActifs.length?'Temps en cours':'Aucun bonus actif')+'</div><div class="gz-yellow-progress"><div class="gz-yellow-fill" style="width:'+bonusPct.toFixed(2)+'%"></div></div>';
+  const bonusRest=bonusActifs.length?Math.min(...bonusActifs.map(x=>remainingSec(x))):0;
+  const bonusTone=bonusActifs.length?gzProgressTone(bonusRest,bonusActifs.every(x=>x.paused)):'';
+  const bonusBar='<div class="gz-yellow-meta">⏱ BONUS — '+(bonusActifs.length?'Temps en cours':'Aucun bonus actif')+'</div><div class="gz-yellow-progress"><div class="gz-yellow-fill '+bonusTone+'" style="width:'+bonusPct.toFixed(2)+'%"></div></div>';
   bonus.innerHTML='<div class="bonus-title">🎁 CASE 7 — BONUS CLIENT FIDÈLE</div><div class="bonus-note">Bonus pour les clients fidèles — veuillez contacter le Patron.</div><span class="bonus-readonly">👁 Affichage seulement · Gérant</span>'+bonusBar+live;
   grid.appendChild(bonus);
 
@@ -1674,13 +1689,14 @@ function updateStats(){
     Object.keys(recettesParPoste||{}).forEach(num=>{
       if(!posteMap.has(String(num))) posteMap.set(String(num),{num,type:''});
     });
+    // Gymnastique dispose de sa propre recette, pas dans les 6 postes TV.
+    posteMap.delete('Gymnastique');
     const rows=Array.from(posteMap.values());
     usageMini.innerHTML=rows.length ? rows.map(row=>{
       const n=Math.max(0,Math.floor(Number(sessionsParPoste[row.num])||0));
-      // Afficher uniquement le montant de la session actuellement active sur ce poste.
-      // Ne jamais afficher ici le cumul journalier du poste.
-      const posteActuel=postes.find(x=>String(x.num)===String(row.num));
-      const montant=posteActuel && posteActuel.actif ? money(posteActuel.montantSession) : 0;
+      // Montant encaissé aujourd'hui par poste, même lorsque sa session est terminée.
+      // Ne pas confondre avec montantSession : ce dernier ne concerne que la session active.
+      const montant=money(recettesParPoste[row.num]);
       return `<div class="usage-mini-row"><span class="usage-mini-name">${row.num}</span><span class="usage-mini-val">${n} fois · ${montant.toLocaleString('fr-FR')} F</span></div>`;
     }).join('') : '<div class="usage-mini-empty">Aucun poste</div>';
   }
@@ -3465,7 +3481,7 @@ window.GymProofFree=(function(){
     u.ventesParJour[dayKey]=money(u.ventesParJour[dayKey])+tar.prix;
     u.updatedAt=Date.now();root.gym=u;const ss=freshSessionSnapshotFromRoot(root);ss.recettes=money(ss.recettes)+tar.prix;ss.parPoste['Gymnastique']=money(ss.parPoste['Gymnastique'])+tar.prix;ss.payStats[g.paiement||'especes']=money(ss.payStats[g.paiement||'especes'])+tar.prix;root.sessions=ss;root.daily=root.daily||{};root.daily[businessDateKey(new Date())]=deepClone(ss);return root;});if(tx&&tx.committed){DB._cache=tx.snapshot.val()||DB._cache;syncGymSessionTotalsG();addJournal('b','🏃 Gymnastique — Temps ajouté',(g.client||'Client')+' · +'+min+' min',tar.prix+' F');showToast('✅ +'+min+' min Gym');renderPostes();updateStats();}}catch(e){showToast('⚠️ Ajout temps Gym impossible');}};
 
-  function renderGymCardG(){const grid=document.getElementById('postes-grid');if(!grid)return;const old=document.getElementById('gym-card-g');if(old)old.remove();const g=gymState(),rest=gymRest(g),card=document.createElement('div');card.id='gym-card-g';card.className='gym-card '+(g.actif?(g.paused?'paused':'active'):'');const proof=GymProofFree.cardHtml(g,currentTenantKey);card.innerHTML=`<div class="gym-head"><div><b>🏃 CASE 8 — GYMNASTIQUE</b><small>Vélo · Abdos · Jambes · Bras</small></div><span>${g.paused?'PAUSE':(g.actif?'EN COURS':'LIBRE')}</span></div><div class="gz-gym-remaining-label">⏱ TEMPS RESTANT — ${g.paused?'EN PAUSE':'DÉCOMPTE ACTIF'}</div><div class="gym-timer-row"><strong class="gz-gym-clock">${g.actif?gymFmt(rest):'00:00'}</strong><em>${g.actif?money(g.montantSession)+' F':''}</em></div><div class="gz-yellow-progress"><div class="gz-yellow-fill" style="width:${g.actif&&Number(g.tempsTotal)>0?Math.min(100,Math.max(0,rest/Number(g.tempsTotal)*100)).toFixed(2):0}%"></div></div><div class="gym-client">${g.actif?esc2(g.client||'Client')+' · '+esc2(g.mouvement||'Gymnastique'):'Disponible · 30 min = 100 F · 1 h = 200 F'}</div>${proof}<div class="gym-actions">${!g.actif?`<button onclick="gymOpenG()">DÉMARRER</button>`:(g.paused?`<button class="gz-gym-action" onclick="gymResumeG()">▶ REPRENDRE</button>`:`<button class="gz-gym-action" onclick="gymPauseG()">⏸ PAUSE</button>`)}${g.actif?`<button class="gz-gym-action" onclick="gymPlusG(30)">+ 30 min / 100 F</button><button class="gz-gym-action" onclick="gymPlusG(60)">+ 1 h / 200 F</button>`:''}</div><div class="gym-no-cancel">🔒 Annulation réservée au Patron.</div>`;grid.appendChild(card);}
+  function renderGymCardG(){const grid=document.getElementById('postes-grid');if(!grid)return;const old=document.getElementById('gym-card-g');if(old)old.remove();const g=gymState(),rest=gymRest(g),card=document.createElement('div');card.id='gym-card-g';card.className='gym-card '+(g.actif?(g.paused?'paused':'active'):'');const proof=GymProofFree.cardHtml(g,currentTenantKey);card.innerHTML=`<div class="gym-head"><div><b>🏃 CASE 8 — GYMNASTIQUE</b><small>Vélo · Abdos · Jambes · Bras</small></div><span>${g.paused?'PAUSE':(g.actif?'EN COURS':'LIBRE')}</span></div><div class="gz-gym-remaining-label">⏱ TEMPS RESTANT — ${g.paused?'EN PAUSE':'DÉCOMPTE ACTIF'}</div><div class="gym-timer-row"><strong class="gz-gym-clock">${g.actif?gymFmt(rest):'00:00'}</strong><em>${g.actif?money(g.montantSession)+' F':''}</em></div><div class="gz-yellow-progress"><div class="gz-yellow-fill ${g.actif?gzProgressTone(rest,!!g.paused):''}" style="width:${g.actif&&Number(g.tempsTotal)>0?Math.min(100,Math.max(0,rest/Number(g.tempsTotal)*100)).toFixed(2):0}%"></div></div><div class="gym-client">${g.actif?esc2(g.client||'Client')+' · '+esc2(g.mouvement||'Gymnastique'):'Disponible · 30 min = 100 F · 1 h = 200 F'}</div>${proof}<div class="gym-actions">${!g.actif?`<button onclick="gymOpenG()">DÉMARRER</button>`:(g.paused?`<button class="gz-gym-action" onclick="gymResumeG()">▶ REPRENDRE</button>`:`<button class="gz-gym-action" onclick="gymPauseG()">⏸ PAUSE</button>`)}${g.actif?`<button class="gz-gym-action" onclick="gymPlusG(30)">+ 30 min / 100 F</button><button class="gz-gym-action" onclick="gymPlusG(60)">+ 1 h / 200 F</button>`:''}</div><div class="gym-no-cancel">🔒 Annulation réservée au Patron.</div>`;grid.appendChild(card);}
   const oldRender=window.renderPostes;window.renderPostes=function(){const r=oldRender&&oldRender.apply(this,arguments);try{document.querySelectorAll('#postes-grid .pc').forEach(c=>{const b=c.querySelector('.pb-off'),t=c.querySelector('.pc-type');if(b&&t&&!/LIBRE/i.test(t.textContent))t.textContent=t.textContent+' · LIBRE';});renderGymCardG();}catch(e){console.log(e);}return r;};
 
   async function finishGymIfNeededG(){if(gymTimerBusy)return;const g=gymState();if(!g.actif||g.paused||gymRest(g)>0)return;gymTimerBusy=true;try{const sid=g.sessionId||'';const tx=await fbRoot.transaction(root=>{root=root||{};const x=root.gym||{};if(!x.actif||(sid&&x.sessionId&&x.sessionId!==sid))return undefined;root.gym=Object.assign({},x,{actif:false,finTs:0,paused:false,pauseRemainingSec:0,updatedAt:Date.now(),endedAt:Date.now()});const ss=freshSessionSnapshotFromRoot(root);ss.count=Math.max(0,Number(ss.count)||0)+1;root.sessions=ss;root.daily=root.daily||{};root.daily[businessDateKey(new Date())]=deepClone(ss);return root;});if(tx&&tx.committed){DB._cache=tx.snapshot.val()||DB._cache;syncGymSessionTotalsG();addJournal('r','🏃 Gymnastique — Temps écoulé',(g.client||'Client')+' · '+(g.mouvement||'Gymnastique')+' · session terminée',money(g.montantSession)+' F','',{poste:'Gymnastique',client:g.client||'',sessionId:sid,typeActivite:'gym_terminee',mouvement:g.mouvement||'',preuveUrl:g.preuveUrl||'',preuvePath:g.preuvePath||'',preuveKind:g.preuveKind||'',preuveSalle:currentTenantKey});renderPostes();updateStats();}}catch(e){console.log('Fin gym:',e);}finally{gymTimerBusy=false;}}

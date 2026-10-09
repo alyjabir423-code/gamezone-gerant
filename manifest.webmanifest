@@ -1,10 +1,10 @@
 {
-  "name": "GameZone CI — Gérant V39",
+  "name": "GameZone CI — Gérant V40",
   "short_name": "GameZone",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#0d0d1a",
   "theme_color": "#0d0d1a",
-  "description": "GameZone — décompte corrigé, surveillance Tuya fiable, barre jaune Bonus/Gym et synchronisation"
+  "description": "Gérant V40 — barres vert/jaune/rouge Bonus & Gym ; utilisation poste = cumul de la journée"
 }
