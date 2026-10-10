@@ -11,7 +11,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="./manifest.webmanifest">
-<title>GameZone Gérant V57 — Synchronisation iPhone et fin rapide</title>
+<title>GameZone Gérant V58 — Synchronisation iPhone et fin rapide</title>
 <style>
 :root{--bg:#0d0d1a;--surface:#13131f;--card:#1a1a2e;--border:#252540;--ac:#7c3aed;--acl:#a855f7;--neon:#c084fc;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--blue:#3b82f6;--text:#f1f0ff;--muted:#6b7280;--sub:#9ca3af;--fd:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--fb:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--r:14px;--rs:9px}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -961,6 +961,7 @@ function createRestRoot(tenantKey){
       await restFetchJson(restUrl(rootPath),{
         method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)
       });
+      gzCloudTimerSyncChanges(current,next); // suivi serveur asynchrone
       if(fbForcePoll)setTimeout(fbForcePoll,20);
       return {committed:true,snapshot:makeSnapshot(next)};
     }
@@ -1008,6 +1009,53 @@ const DB={
   onChange(cb){ this._changeCb=cb; }
 };
 
+
+// V58/V35 : synchronisation de l'alarme OFF auprès du Worker Cloudflare.
+// La seule source de vérité est Firebase, jamais l'heure envoyée par le navigateur.
+let gzCloudSyncAllDone=false;
+const gzCloudSyncTimers=new Map();
+function gzCloudTimerSync(poste, attempt=0){
+  if(!currentTenantKey)return;
+  const k=poste==null?'__all__':String(poste);
+  if(gzCloudSyncTimers.has(k))clearTimeout(gzCloudSyncTimers.get(k));
+  const delay=attempt===0?180:Math.min(60000,1500*Math.pow(2,attempt));
+  gzCloudSyncTimers.set(k,setTimeout(async function(){
+    gzCloudSyncTimers.delete(k);
+    try{
+      const token=await ensureFirebaseToken();
+      if(!token)throw Error('Jeton Firebase absent');
+      const payload={tenantKey:currentTenantKey,action:poste==null?'syncAllTimers':'syncTimer'};
+      if(poste!=null)payload.poste=String(poste);
+      const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),9000);
+      let resp;
+      try {resp=await fetch(TUYA_WORKER_URL,{method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+        body:JSON.stringify(payload),cache:'no-store',signal:ctrl.signal});}
+      finally{clearTimeout(timer);}
+      if(!resp.ok)throw Error('Worker alarm HTTP '+resp.status);
+      const result=await resp.json().catch(()=>null);
+      if(!result || result.success!==true)throw Error('Alarme serveur non confirmée');
+    }catch(e){
+      console.warn('Minuterie serveur non synchronisée:',poste,e&&e.message);
+      if(attempt<4)gzCloudTimerSync(poste,attempt+1);
+      else if(typeof loggedIn!=='undefined' && loggedIn)showToast('⚠️ Minuteur serveur non confirmé : garder GameZone ouvert');
+    }
+  },delay));
+}
+function gzCloudTimerSyncChanges(original,next){
+  const a=(original&&original.active_by_poste)||{};
+  const b=(next&&next.active_by_poste)||{};
+  for(const k of new Set([...Object.keys(a),...Object.keys(b)])){
+    if(JSON.stringify(a[k])!==JSON.stringify(b[k])){
+      // Le poste a une clé Firebase déjà encodée, ici il faut revenir au num réel.
+      let poste=k;try{poste=decodeURIComponent(k);}catch(e){}
+      gzCloudTimerSync(poste);
+    }
+  }
+}
+window.addEventListener('online',()=>gzCloudTimerSync(null));
+window.addEventListener('pageshow',()=>{if(gzCloudSyncAllDone)gzCloudTimerSync(null);});
+
 function connectTenant(tenantKey){
   DB._ready=false;
   DB._readyCbs=DB._readyCbs||[];
@@ -1025,6 +1073,7 @@ function connectTenant(tenantKey){
       try{ gzStorageSet('gz_tenant_cache_'+tenantKey, JSON.stringify(DB._cache)); }catch(e){}
       setOfflineMode(false);
       if(!DB._ready){
+        gzCloudSyncAllDone=true;gzCloudTimerSync(null);
         DB._ready=true;
         const cbs=DB._readyCbs.slice(); DB._readyCbs=[];
         cbs.forEach(function(cb){try{cb();}catch(e){console.log(e);}});
